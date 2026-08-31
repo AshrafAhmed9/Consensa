@@ -1,0 +1,22 @@
+syntax = "proto3";
+package consensa.v1;
+option go_package = "github.com/ashraf/consensa/api/consensa/v1;consensav1";
+
+service Consensa {
+  rpc Upsert(stream UpsertRequest) returns (UpsertResponse);
+  rpc Search(SearchRequest) returns (stream SearchResult);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc BatchGet(BatchGetRequest) returns (BatchGetResponse);
+  rpc Status(StatusRequest) returns (StatusResponse);
+}
+message Vector { repeated float values = 1; }
+message UpsertRequest { string id = 1; Vector vector = 2; }
+message UpsertResponse { uint64 accepted = 1; }
+message SearchRequest { Vector query = 1; uint32 k = 2; uint32 ef = 3; }
+message SearchResult { string id = 1; float distance = 2; }
+message DeleteRequest { string id = 1; }
+message DeleteResponse {}
+message BatchGetRequest { repeated string ids = 1; }
+message BatchGetResponse { map<string, Vector> vectors = 1; }
+message StatusRequest {}
+message StatusResponse { string role = 1; uint64 term = 2; }

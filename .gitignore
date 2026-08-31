@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+
+# Local tool caches — regenerable, not repo content
+graphify-out/
+
+# Go
+/consensa
+/consensa-cli
+*.test
+*.out
+coverage.*
+
+# Python harness
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Benchmark datasets — large, downloaded on demand by harness/bench
+harness/bench/data/
+
+# TLC model-checking output
+specs/states/
+specs/*.toolbox/

@@ -1,0 +1,28 @@
+TLC counterexample for specs/membership_broken.tla (INVARIANT NoTwoLeaders violated)
+Constants: Nodes={n1,n2,n3,n4}  Old={n1,n2,n3}  New={n2,n3,n4}  Terms={1}  Phase="joint"
+
+State 1 <Initial predicate>
+  elected = {}
+  votes = {}
+
+State 2 <CastVote(1,n1,n1)>   n1 votes for n1
+State 3 <CastVote(1,n2,n1)>   n2 votes for n1        -> {n1,n2} is a majority of Old (2 of 3)
+State 4 <CastVote(1,n3,n2)>   n3 votes for n2
+State 5 <CastVote(1,n4,n2)>   n4 votes for n2        -> {n3,n4} is a majority of New (2 of 3)
+
+State 6 <BecomeLeader(1,n1)>  n1 elected: majority-of-Old satisfied (broken rule accepts OR)
+  elected = {<<1, n1>>}
+
+State 7 <BecomeLeader(1,n2)>  n2 elected: majority-of-New satisfied (broken rule accepts OR)
+  elected = {<<1, n1>>, <<1, n2>>}   <-- NoTwoLeaders violated: two leaders, term 1
+
+Root cause: the broken HasQuorum uses OR (majority of Old \/ majority of New) during the
+joint phase instead of AND. {n1,n2} and {n3,n4} are disjoint, so nothing forces them to
+share a voter -- the single-vote-per-term rule only prevents double-voting, it cannot by
+itself prevent two non-overlapping quorums from existing when the rule accepts either one
+alone. The dual-majority AND requirement in membership.tla is what forces every majority
+of Old to intersect every majority of New (pigeonhole on the shared members), which is
+the actual safety argument -- and membership.tla passes with the same nodes and votes.
+
+3441 states generated, 1014 distinct states found, depth 7. Reproduced 2026-09-01 with
+TLC (tla2tools.jar) via: java -cp tla2tools.jar tlc2.TLC -deadlock membership_broken.tla

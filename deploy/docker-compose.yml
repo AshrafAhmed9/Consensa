@@ -1,0 +1,6 @@
+services:
+  consensa:
+    build: ..
+    command: ["consensa", "-listen", ":8080", "-dimension", "3"]
+    ports: ["8080:8080"]
+    profiles: ["demo"]
