@@ -99,7 +99,7 @@ func (m *MultiplexedTransport) accept() {
 }
 
 func (m *MultiplexedTransport) receive(connection net.Conn) {
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	data, err := readFrame(connection)
 	if err != nil {
 		return
@@ -179,6 +179,6 @@ func (v *rangeView) Send(message Message) error {
 	if err != nil {
 		return err
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	return writeFrame(connection, data)
 }

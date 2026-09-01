@@ -85,7 +85,7 @@ func driveRanges(ranges []*DurableRange, interval time.Duration, stop <-chan str
 
 func putUntilAccepted(ranges []*DurableRange, key, value []byte, deadline time.Duration) error {
 	end := time.Now().Add(deadline)
-	var lastErr error = errors.New("no replica accepted the put")
+	lastErr := errors.New("no replica accepted the put")
 	for time.Now().Before(end) {
 		for _, r := range ranges {
 			if err := r.Put(key, value); err == nil {
@@ -245,7 +245,7 @@ func TestDurableRangeDeleteIsDurable(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	var lastErr error = errors.New("no replica accepted the delete")
+	lastErr := errors.New("no replica accepted the delete")
 	deleted := false
 	deadline = time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) && !deleted {

@@ -59,7 +59,7 @@ func driveDurable(nodes []*DurableNode, interval time.Duration, stop <-chan stru
 
 func proposeInsertToLeader(nodes []*DurableNode, id string, v vector.Vector, deadline time.Duration) error {
 	end := time.Now().Add(deadline)
-	var lastErr error = errors.New("no replica accepted the insert")
+	lastErr := errors.New("no replica accepted the insert")
 	for time.Now().Before(end) {
 		for _, n := range nodes {
 			if err := n.Insert(id, v); err == nil {

@@ -61,19 +61,6 @@ func (s *skiplist) put(key, value []byte, tombstone bool) {
 	}
 	s.size++
 }
-func (s *skiplist) get(key []byte) ([]byte, bool, bool) {
-	x := s.head
-	for l := s.level - 1; l >= 0; l-- {
-		for x.next[l] != nil && bytes.Compare(x.next[l].key, key) < 0 {
-			x = x.next[l]
-		}
-	}
-	x = x.next[0]
-	if x == nil || !bytes.Equal(x.key, key) {
-		return nil, false, false
-	}
-	return append([]byte(nil), x.value...), x.tombstone, true
-}
 func (s *skiplist) all() []record {
 	out := make([]record, 0, s.size)
 	for x := s.head.next[0]; x != nil; x = x.next[0] {

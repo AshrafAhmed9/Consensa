@@ -99,7 +99,7 @@ func routedPut(t *testing.T, router *Router, groups map[uint64]*durableRangeGrou
 		t.Fatalf("router resolved %q to unknown range %d", key, descriptor.ID)
 	}
 	end := time.Now().Add(deadline)
-	var lastErr error = errors.New("no replica accepted the put")
+	lastErr := errors.New("no replica accepted the put")
 	for time.Now().Before(end) {
 		for _, r := range group.list() {
 			if err := r.Put(key, value); err == nil {

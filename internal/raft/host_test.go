@@ -138,7 +138,7 @@ func driveHosts(hosts []*testHost, tickInterval time.Duration, stop <-chan struc
 // that instead of reaching into node internals.
 func proposeToLeader(hosts []*testHost, data []byte, deadline time.Duration) error {
 	end := time.Now().Add(deadline)
-	var lastErr error = errors.New("no host accepted the proposal")
+	lastErr := errors.New("no host accepted the proposal")
 	for time.Now().Before(end) {
 		for _, h := range hosts {
 			if err := h.host.Propose(data); err == nil {

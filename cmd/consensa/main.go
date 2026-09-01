@@ -174,7 +174,7 @@ func main() {
 	grpcServer := grpc.NewServer()
 	consensav1.RegisterConsensaServer(grpcServer, service)
 	log.Printf("consensa node %d: raft on %s, gRPC on %s, metrics on http://%s/metrics, data in %s",
-		selfID, selfAddr, *grpcListen, fmt.Sprintf("%s", *metricsListen), *dataDir)
+		selfID, selfAddr, *grpcListen, *metricsListen, *dataDir)
 	log.Fatal(grpcServer.Serve(listener))
 }
 

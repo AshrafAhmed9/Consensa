@@ -6,3 +6,15 @@ linters:
     revive:
       rules:
         - name: exported
+  exclusions:
+    rules:
+      # Checking a cleanup Close()'s error in a defer is conventional to skip in Go test
+      # code -- the test has already gotten what it needed by the time cleanup runs, and
+      # a failed cleanup close has no correctness consequence for the test itself. This
+      # rule is deliberately scoped to _test.go files only; the same pattern in
+      # production code (internal/raft/tcp.go, multiplex.go, storage.go, sstable.go) is
+      # fixed properly instead (defer func() { _ = x.Close() }()), because there the
+      # silence needs to be visibly deliberate, not just idiomatic test noise.
+      - path: _test\.go
+        linters:
+          - errcheck

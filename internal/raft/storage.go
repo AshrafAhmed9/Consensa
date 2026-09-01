@@ -73,7 +73,7 @@ func (p *Persister) LoadSnapshot() (Snapshot, error) {
 // replaying compacted history.
 func (p *Persister) LoadEntries() ([]Entry, error) {
 	it := p.engine.Scan([]byte("raft/log/"), []byte("raft/log0"), storage.HLC{WallTime: math.MaxInt64})
-	defer it.Close()
+	defer func() { _ = it.Close() }()
 	var entries []Entry
 	for it.Next() {
 		var entry Entry

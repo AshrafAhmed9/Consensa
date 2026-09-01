@@ -218,10 +218,6 @@ func (h *HNSW) Delete(id string) error {
 	h.Repair(func(candidate string) bool { return candidate != id })
 	return nil
 }
-func (h *HNSW) closest(q vector.Vector, l, limit int) []Result {
-	return h.closestExcept(q, l, limit, "")
-}
-
 func (h *HNSW) closestExcept(q vector.Vector, l, limit int, exclude string) []Result {
 	rs := make([]Result, 0)
 	for id, n := range h.nodes {

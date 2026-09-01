@@ -1,13 +1,11 @@
 package storage
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 )
 
 type record struct {
@@ -20,7 +18,6 @@ type record struct {
 type sstable struct {
 	path    string
 	records []record
-	filter  *bloom
 }
 
 func writeSSTable(dir string, generation uint64, records []record) (*sstable, error) {
@@ -32,10 +29,8 @@ func writeSSTable(dir string, generation uint64, records []record) (*sstable, er
 	if e != nil {
 		return nil, e
 	}
-	defer f.Close()
-	keys := make([][]byte, len(records))
-	for i, r := range records {
-		keys[i] = r.key
+	defer func() { _ = f.Close() }()
+	for _, r := range records {
 		header := make([]byte, 9)
 		if r.tombstone {
 			header[0] = 1
@@ -55,7 +50,7 @@ func writeSSTable(dir string, generation uint64, records []record) (*sstable, er
 	if e = f.Sync(); e != nil {
 		return nil, e
 	}
-	return &sstable{path: p, records: cloneRecords(records), filter: newBloom(keys)}, nil
+	return &sstable{path: p, records: cloneRecords(records)}, nil
 }
 func openSSTable(path string) (*sstable, error) {
 	data, e := os.ReadFile(path)
@@ -77,22 +72,7 @@ func openSSTable(path string) (*sstable, error) {
 		rs = append(rs, record{key: append([]byte(nil), data[:k]...), value: append([]byte(nil), data[k:k+v]...), tombstone: t})
 		data = data[k+v:]
 	}
-	keys := make([][]byte, len(rs))
-	for i := range rs {
-		keys[i] = rs[i].key
-	}
-	return &sstable{path: path, records: rs, filter: newBloom(keys)}, nil
-}
-func (t *sstable) get(key []byte) ([]byte, bool, bool) {
-	if !t.filter.mayContain(key) {
-		return nil, false, false
-	}
-	i := sort.Search(len(t.records), func(i int) bool { return bytes.Compare(t.records[i].key, key) >= 0 })
-	if i == len(t.records) || !bytes.Equal(t.records[i].key, key) {
-		return nil, false, false
-	}
-	r := t.records[i]
-	return append([]byte(nil), r.value...), r.tombstone, true
+	return &sstable{path: path, records: rs}, nil
 }
 func cloneRecords(in []record) []record {
 	out := make([]record, len(in))

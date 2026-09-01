@@ -64,7 +64,7 @@ func (t *TCPTransport) Send(message Message) error {
 	if err != nil {
 		return err
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	if err := writeFrame(connection, data); err != nil {
 		return err
 	}
@@ -97,7 +97,7 @@ func (t *TCPTransport) accept() {
 }
 
 func (t *TCPTransport) receive(connection net.Conn) {
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	data, err := readFrame(connection)
 	if err != nil {
 		return
