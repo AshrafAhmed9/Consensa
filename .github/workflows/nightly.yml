@@ -16,3 +16,4 @@ jobs:
       - run: go test -race ./...
       - run: python -m pytest harness
       - run: python -m harness.torture.cli run --workload register --nemesis partition,crash --seeds 1000
+      - run: python -m harness.torture.cli run --workload vector --nemesis partition,crash --seeds 1000
