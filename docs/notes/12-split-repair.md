@@ -33,16 +33,25 @@ recall@5 against each child's own ground truth stays high (>= 0.80 in the test) 
 split -- the split does not silently degrade search quality for data that legitimately
 belongs to that child.
 
+**Update: the same proof now exists for the KV plane too.**
+`TestLiveSplitPreservesKVCorrectness` (`internal/kv/durable_split_test.go`) is the direct
+counterpart: one real 3-node `DurableRange` group is written across a chosen split key,
+then split into two fresh 3-node child groups by reading the parent's full applied state
+via `DurableRange.AllKeys()` and re-proposing each key/value into whichever child owns it
+under `SplitDescriptor`'s new boundary. It proves the same three things `AllKeys` exists
+for: no key lost or duplicated across the split; no cross-boundary key survives in either
+child; and every migrated value is byte-identical to what the parent held, not just
+present under the same key.
+
 **What this does not prove, stated plainly:** there is still no automatic trigger (size or
-QPS threshold), no live traffic cutover (the test builds fresh groups and searches them
-directly; nothing routes an in-flight client from the parent to the correct child), and
-`kv.SplitDescriptor`'s metadata-transaction requirement above is still unconnected to this
-proof -- the two pieces (keyspace descriptor split, graph data split) are each proven
-independently but not yet wired to fire together as one operation. The "rebuild from
-scratch" strategy used here is also, by the plan's own account, the most expensive of the
-three named options: real production use would want incremental repair or a
-stale-parent-during-rebuild fallback to avoid the latency cliff this approach causes while
-every vector is re-inserted one at a time.
+QPS threshold) on either plane, no live traffic cutover (both tests build fresh groups and
+read/search them directly; nothing routes an in-flight client from the parent to the
+correct child mid-split), and the keyspace descriptor split and the data split are each
+proven independently but not yet wired to fire together as one atomic operation triggered
+off real traffic. The "rebuild from scratch" strategy used by both planes is also, by the
+plan's own account, the most expensive of the three named options: real production use
+would want incremental repair or a stale-parent-during-rebuild fallback to avoid the
+latency cliff this approach causes while every key or vector is re-inserted one at a time.
 
 ## What can fail?
 

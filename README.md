@@ -66,9 +66,12 @@ the design decisions and their reasoning, including ones later sessions overturn
   Raft groups, a transaction record survives a real node restart via real Raft log
   replay, and the `ConsensaKV.TransactionalPut` RPC drives all of it from a real network
   client -- not just from Go code in the same process.
-- **A live range split preserves search correctness**, proven against real 3-node
-  `DurableNode` groups: no vector lost or duplicated, no cross-boundary search leakage,
-  recall staying high after the split.
+- **A live range split preserves correctness on both planes**, each proven against real
+  3-node groups by rebuilding fresh child groups from the parent's actual applied data:
+  the vector plane (`DurableNode`) shows no vector lost or duplicated, no cross-boundary
+  search leakage, and recall staying high after the split; the KV plane (`DurableRange`)
+  shows no key lost or duplicated and no cross-boundary key surviving in either child,
+  reading the parent's real state via `DurableRange.AllKeys()`.
 - **Formally verified quorum-intersection and split-invariant properties.** `specs/`
   holds TLA+ models for joint-consensus quorum intersection and recursive range
   splitting, each checked by TLC with a required negative control that must fail.
