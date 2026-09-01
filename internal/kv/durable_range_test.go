@@ -285,6 +285,91 @@ func TestDurableRangeDeleteIsDurable(t *testing.T) {
 	}
 }
 
+// TestAllKeysExcludesReservedNamespaceAndReflectsDeletes proves AllKeys returns exactly
+// the application data a replica has applied -- not Persister's "raft/" bookkeeping
+// sharing the same engine, and not a stale snapshot that still shows a deleted key. Both
+// are real ways this could go wrong: a naive full-engine scan would include "raft/" keys,
+// and a scan taken before a delete's tombstone is visible would show a value already gone
+// from Get.
+func TestAllKeysExcludesReservedNamespaceAndReflectsDeletes(t *testing.T) {
+	ids := []raft.NodeID{1, 2, 3}
+	group := startDurableRangeGroup(t, 1, nil, nil, ids)
+	defer group.closeAll(t)
+
+	stop := make(chan struct{})
+	wg := driveRanges(group.list(), 10*time.Millisecond, stop)
+	defer func() { close(stop); wg.Wait() }()
+
+	var leader *DurableRange
+	deadline := time.Now().Add(20 * time.Second)
+	for leader == nil {
+		for _, r := range group.list() {
+			if role, _ := r.Status(); role == raft.Leader {
+				leader = r
+				break
+			}
+		}
+		if leader == nil {
+			if time.Now().After(deadline) {
+				t.Fatal("no leader elected")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	want := map[string][]byte{"a": []byte("1"), "b": []byte("2"), "c": []byte("3")}
+	for k, v := range want {
+		if err := putUntilAccepted(group.list(), []byte(k), v, 20*time.Second); err != nil {
+			t.Fatalf("put %s: %v", k, err)
+		}
+	}
+	deadline = time.Now().Add(20 * time.Second)
+	for {
+		all, err := leader.AllKeys()
+		if err == nil && len(all) == len(want) {
+			ok := true
+			for k, v := range want {
+				if string(all[k]) != string(v) {
+					ok = false
+				}
+			}
+			if ok {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("AllKeys never converged to %v, last=%v err=%v", want, all, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	deleted := false
+	deadline = time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) && !deleted {
+		if err := leader.Delete([]byte("b")); err == nil {
+			deleted = true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !deleted {
+		t.Fatal("delete of b never accepted")
+	}
+
+	deadline = time.Now().Add(20 * time.Second)
+	for {
+		all, err := leader.AllKeys()
+		if err == nil {
+			if _, present := all["b"]; !present && len(all) == 2 {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("AllKeys never reflected the delete of b, last=%v err=%v", all, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestConsistentGetRequiresLeadership proves ConsistentGet actually enforces the
 // leader-only contract its doc comment claims -- the property that makes it linearizable
 // where Get is only bounded-stale. A follower must reject it exactly like Put/Delete

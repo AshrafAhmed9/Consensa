@@ -167,6 +167,25 @@ func (r *DurableRange) ConsistentGet(key []byte) ([]byte, error) {
 	return r.Get(key)
 }
 
+// AllKeys returns every application key/value this replica has currently applied,
+// excluding Persister's reserved "raft/" namespace -- a full scan of this replica's
+// local engine, not a Raft operation. It exists for split-key selection and the live
+// data migration a range split performs (see split.go and durable_split_test.go): both
+// need to see the range's actual current content, not just individual keys.
+func (r *DurableRange) AllKeys() (map[string][]byte, error) {
+	it := r.db.Scan(nil, nil, storage.HLC{WallTime: math.MaxInt64})
+	defer func() { _ = it.Close() }()
+	out := map[string][]byte{}
+	for it.Next() {
+		key := it.Key()
+		if bytes.HasPrefix(key, reservedKeyPrefix) {
+			continue
+		}
+		out[string(key)] = append([]byte(nil), it.Value()...)
+	}
+	return out, it.Err()
+}
+
 // validateRangeKey rejects an empty key or one that collides with Persister's reserved
 // namespace in the same underlying engine.
 func validateRangeKey(key []byte) error {
