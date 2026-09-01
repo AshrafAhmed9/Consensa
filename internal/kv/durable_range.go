@@ -222,6 +222,20 @@ func (r *DurableRange) AllKeys() (map[string][]byte, error) {
 	return out, it.Err()
 }
 
+// MaybeSplitKey applies ShouldSplit (split.go) against this replica's own currently
+// applied data, so a caller deciding whether to split doesn't have to call AllKeys and
+// ShouldSplit separately. Like AllKeys, this is a local read of whatever this replica has
+// applied, not a Raft operation, and it only answers the decision question -- see
+// ShouldSplit's own doc comment for what still has to happen after this returns true.
+func (r *DurableRange) MaybeSplitKey(threshold int) ([]byte, bool, error) {
+	keys, err := r.AllKeys()
+	if err != nil {
+		return nil, false, err
+	}
+	splitKey, ok := ShouldSplit(threshold, keys)
+	return splitKey, ok, nil
+}
+
 // GrantLease proposes a lease authorizing holder to serve follower reads over
 // [now, now+duration) once the proposal commits and every replica applies it. Like Put,
 // this only succeeds if this replica is currently the Raft leader -- a lease is only

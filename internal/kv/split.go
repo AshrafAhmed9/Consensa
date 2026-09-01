@@ -3,9 +3,41 @@ package kv
 import (
 	"bytes"
 	"errors"
+	"sort"
 
 	"github.com/ashraf/consensa/internal/raft"
 )
+
+// ShouldSplit decides whether a range holding keys has grown past threshold, and if so,
+// which key to split at. This is the piece PLAN.md's Phase 10 names as still missing --
+// "no automatic range-split trigger" -- and it deliberately closes only the DECISION, not
+// execution: a caller still has to run the already-proven live-migration strategy
+// (durable_split_test.go's TestLiveSplitPreservesKVCorrectness) against whatever key this
+// returns, and this project has no dynamic descriptor/routing update path yet (Router and
+// meta.go both operate on a fixed, static set of ranges) to actually cut real traffic over
+// to two fresh groups automatically. Stated plainly rather than implied: this function
+// alone does not perform a split.
+//
+// The split point is the median key by sorted order, not by byte-value midpoint --
+// picking the middle of an arbitrary keyspace by value (e.g. bisecting between "a" and
+// "z") can produce a wildly uneven split if the actual key distribution is skewed, while
+// the median of the keys actually present always divides the range's real data in half.
+func ShouldSplit(threshold int, keys map[string][]byte) ([]byte, bool) {
+	if threshold <= 0 || len(keys) <= threshold {
+		return nil, false
+	}
+	sorted := make([]string, 0, len(keys))
+	for k := range keys {
+		sorted = append(sorted, k)
+	}
+	sort.Strings(sorted)
+	// The key at the midpoint index becomes the new right child's Start (inclusive, per
+	// Descriptor's own half-open [Start, End) convention) -- so it must not be sorted[0],
+	// which would make the left child empty. len(keys) > threshold >= 1 guarantees at
+	// least 2 keys, so mid >= 1 is always a valid interior split point.
+	mid := len(sorted) / 2
+	return []byte(sorted[mid]), true
+}
 
 // SplitDescriptor divides one descriptor at splitKey without a gap or overlap. Callers
 // persist the replacement atomically in metadata before exposing either child to routing.
