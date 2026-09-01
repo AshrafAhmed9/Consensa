@@ -66,13 +66,25 @@ a real bug but was actually the test not waiting for the right condition. Fixed 
 retrying until the result content matches ground truth, not just its length -- the same
 discipline `internal/ann/durable_split_test.go`'s per-insert `waitForApplied` calls
 already established earlier this session for a different reason (racing proposals against
-a leadership change). A separate, real finding along the way: proposing many upserts
-back-to-back with no pause between them (8, in an earlier version of this test) measurably
-increased the chance of hitting a leadership blip long enough to exceed even a generous
-per-key retry budget, compared to 3; the test uses a small, deliberately chosen dataset
-now, and the underlying question -- why a healthy cluster doesn't always recover a rapid
-upsert burst comfortably within the existing retry budget -- is noted here as worth
-investigating further, not chased down in this pass.
+a leadership change). A separate, real finding along the way, investigated partway and
+deliberately not chased to a final root cause: proposing 8 upserts back-to-back with no
+pause (an earlier version of this test) made specific keys -- not all of them, most
+succeeded on the first or second retry -- get stuck for the full 10-second retry budget,
+every attempt against all 3 nodes failing with `raft: proposal to non-leader`. Diagnosed
+with temporary instrumentation (not committed): **this rules out ordinary leadership
+churn as the cause** -- `consensa_raft_term` stayed completely stable and identical
+across all 3 nodes for the entire stuck window, exactly what a healthy cluster with an
+uncontested, unchanging leader looks like. That error can only come from one place
+(`node.Propose`'s `n.role != Leader` check, `internal/raft/node.go`), so at the moment of
+each failing call the node being asked genuinely did not consider itself leader -- yet
+across dozens of attempts spanning all 3 nodes, none of them ever did, despite one of
+them clearly holding a stable leadership term the whole time. This is a real, narrowed-
+down symptom, not vague flakiness -- but the mechanism connecting "a stable leader term
+exists" to "no node ever answers as that leader for this specific key" was not found
+within this session's effort budget, and forcing a conclusion without pinning it down
+would be exactly the kind of unearned confidence this project's documentation standard
+argues against. The test uses a small dataset now to route around the symptom, not to
+hide it; this paragraph is the honest record of what remains actually unknown.
 
 **Grafana dashboards are now provisioned and verified against the real stack, not just
 written.** `deploy/docker-compose.yml` gained `prometheus` and `grafana` services;
