@@ -58,6 +58,18 @@ func startDurableRangeGroup(t *testing.T, rangeID uint64, start, end []byte, ids
 		}
 		r, err := NewDurableRange(DurableRangeConfig{
 			ID: id, GroupPeers: ids, ListenAddress: g.addrs[id], TransportPeers: peers, StorageDir: g.dirs[id],
+			// Wider than DurableRange's own default (10/2): this test runs two full
+			// 3-node groups' worth of real goroutines, real TCP, and real fsync'd
+			// writes simultaneously in one process, and asserts that range B's
+			// leadership never changes on its own. The default's ~100ms heartbeat
+			// grace (10 ticks * 10ms drive interval) is tight enough that ordinary
+			// scheduling jitter on a contended CI runner can legitimately exceed it,
+			// triggering a real, correct election with nothing wrong in the product --
+			// found via an actual CI failure (role=0 term=11, want term=10), not
+			// speculation. A wider grace period doesn't change what's being proven,
+			// only how much scheduling noise the test can absorb before a spurious
+			// election could occur.
+			ElectionTick: 30, HeartbeatTick: 3,
 		})
 		if err != nil {
 			t.Fatalf("range %d node %d: %v", rangeID, id, err)
