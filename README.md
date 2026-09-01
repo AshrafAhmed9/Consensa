@@ -61,9 +61,11 @@ the design decisions and their reasoning, including ones later sessions overturn
   under seeded fault schedules (via `cmd/torture` for the KV/register plane and
   `cmd/vectortorture` for the HNSW/vector plane) and checks the resulting real,
   client-observable history -- not a fixed, seed-independent stub.
-- **Real cross-range transactions.** `internal/txn`'s 2PC coordinator commits atomically
-  across two genuinely separate 3-node `DurableRange` Raft groups, and a transaction
-  record survives a real node restart via real Raft log replay.
+- **Real cross-range transactions, reachable over gRPC.** `internal/txn`'s 2PC
+  coordinator commits atomically across two genuinely separate 3-node `DurableRange`
+  Raft groups, a transaction record survives a real node restart via real Raft log
+  replay, and the `ConsensaKV.TransactionalPut` RPC drives all of it from a real network
+  client -- not just from Go code in the same process.
 - **A live range split preserves search correctness**, proven against real 3-node
   `DurableNode` groups: no vector lost or duplicated, no cross-boundary search leakage,
   recall staying high after the split.
@@ -81,9 +83,10 @@ Stated plainly rather than left implied by omission: no automatic range-split tr
 live traffic cutover; no multi-range transport batching beyond a shared listener (every
 range still dials its own outbound connections); no joint-consensus membership changes
 wired into the live voting path (the quorum math exists and is unit-tested,
-`internal/raft/membership.go`, but nothing calls it yet); no client-facing RPC for
-cross-range transactions (`internal/txn` is proven durable but not reachable over gRPC);
-no recall metric wired to a running process; no serializable isolation (Phase 14 --
+`internal/raft/membership.go`, but nothing calls it yet); `ConsensaKV.TransactionalPut`
+is proven against real `DurableRange` groups by its own dedicated test but not wired into
+`cmd/consensa`, which still only runs the vector plane; no recall metric wired to a
+running process; no serializable isolation (Phase 14 --
 snapshot isolation's write-skew gap is reproduced as a test, not yet closed). ANN search
 is approximate by construction and is never described as linearizable; only the
 register/KV plane makes that claim, and only where a test backs it.

@@ -36,10 +36,24 @@ returns once locally appended, not once committed, which the coordinator's proto
 implicitly assumed would already be visible -- closed with a confirm-on-write helper, not
 by weakening the coordinator's contract).
 
-Two things this phase does NOT yet cover, stated plainly: no client-facing RPC
-(`internal/server`) drives `Coordinator` yet -- `DurableStore` is proven reachable and
-correct, but nothing routes an incoming multi-range write request to it automatically,
-and `internal/kv.Router` doesn't know how to resolve a transaction's participants for a
-caller the way today's tests construct them by hand. `WriteIntent`'s conflict check also
+**Update: a client-facing RPC now drives Coordinator.** `ConsensaKV.TransactionalPut`
+(`api/consensa/v1/consensa.proto`, implemented in `internal/server/kv_service.go`) takes a
+map of key/value writes, resolves each key's owning range through a real `kv.Router`,
+groups them into one `txn.WriteSet` per range, and commits them all atomically through a
+real `txn.Coordinator`.
+`TestTransactionalPutCommitsAcrossRealRangesOverGRPC` proves the whole path a client
+actually uses: a real gRPC call reaching two real, independent 3-node `kv.DurableRange`
+groups, committed atomically. This is deliberately a separate gRPC service from
+`Consensa` (the vector-index plane) rather than folded into it -- see
+`kv_service.go`'s doc comment for why mixing the two would be the wrong shape, not a
+convenience worth taking.
+
+What this still does not cover, stated plainly: it is not wired into `cmd/consensa`,
+which still only runs the vector plane -- `KVService` is proven by its own dedicated
+test against real `DurableRange` groups, not by a running production binary. There is
+also no single-key read/write RPC (every write goes through the full 2PC path, correct
+but not the cheapest shape for the common one-key case) and no automatic retry against
+`kv.ErrRangeKeyMismatch` the way `kv.RoutedKV.retryRoute` already models for the
+non-transactional path. `WriteIntent`'s conflict check also
 remains non-atomic with its own bookkeeping update under concurrent writers to the same
 key, for the same reason `kv.DurableRange` has no conditional Put to build a real fix on.

@@ -20,3 +20,19 @@ message BatchGetRequest { repeated string ids = 1; }
 message BatchGetResponse { map<string, Vector> vectors = 1; }
 message StatusRequest {}
 message StatusResponse { string role = 1; uint64 term = 2; }
+
+// ConsensaKV is a separate service from Consensa (the vector-index plane) on purpose: it
+// exposes internal/txn's cross-range 2PC coordinator, which has nothing to do with the
+// HNSW Index a Consensa server wraps. See internal/server/kv_service.go's doc comment for
+// the full reasoning and what this deliberately does not yet cover (single-key writes,
+// reads, and the DurableRange-per-range assembly are the caller's job today).
+service ConsensaKV {
+  rpc TransactionalPut(TransactionalPutRequest) returns (TransactionalPutResponse);
+}
+message TransactionalPutRequest {
+  // txn_id must be unique per transaction; the caller picks it (a UUID, typically) since
+  // only the caller knows whether a retried call is the same transaction or a new one.
+  string txn_id = 1;
+  map<string, bytes> writes = 2;
+}
+message TransactionalPutResponse {}

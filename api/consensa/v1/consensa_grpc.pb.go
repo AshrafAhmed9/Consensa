@@ -268,3 +268,117 @@ var Consensa_ServiceDesc = grpc.ServiceDesc{
 	},
 	Metadata: "api/consensa/v1/consensa.proto",
 }
+
+const (
+	ConsensaKV_TransactionalPut_FullMethodName = "/consensa.v1.ConsensaKV/TransactionalPut"
+)
+
+// ConsensaKVClient is the client API for ConsensaKV service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// ConsensaKV is a separate service from Consensa (the vector-index plane) on purpose: it
+// exposes internal/txn's cross-range 2PC coordinator, which has nothing to do with the
+// HNSW Index a Consensa server wraps. See internal/server/kv_service.go's doc comment for
+// the full reasoning and what this deliberately does not yet cover (single-key writes,
+// reads, and the DurableRange-per-range assembly are the caller's job today).
+type ConsensaKVClient interface {
+	TransactionalPut(ctx context.Context, in *TransactionalPutRequest, opts ...grpc.CallOption) (*TransactionalPutResponse, error)
+}
+
+type consensaKVClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewConsensaKVClient(cc grpc.ClientConnInterface) ConsensaKVClient {
+	return &consensaKVClient{cc}
+}
+
+func (c *consensaKVClient) TransactionalPut(ctx context.Context, in *TransactionalPutRequest, opts ...grpc.CallOption) (*TransactionalPutResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TransactionalPutResponse)
+	err := c.cc.Invoke(ctx, ConsensaKV_TransactionalPut_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ConsensaKVServer is the server API for ConsensaKV service.
+// All implementations must embed UnimplementedConsensaKVServer
+// for forward compatibility.
+//
+// ConsensaKV is a separate service from Consensa (the vector-index plane) on purpose: it
+// exposes internal/txn's cross-range 2PC coordinator, which has nothing to do with the
+// HNSW Index a Consensa server wraps. See internal/server/kv_service.go's doc comment for
+// the full reasoning and what this deliberately does not yet cover (single-key writes,
+// reads, and the DurableRange-per-range assembly are the caller's job today).
+type ConsensaKVServer interface {
+	TransactionalPut(context.Context, *TransactionalPutRequest) (*TransactionalPutResponse, error)
+	mustEmbedUnimplementedConsensaKVServer()
+}
+
+// UnimplementedConsensaKVServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedConsensaKVServer struct{}
+
+func (UnimplementedConsensaKVServer) TransactionalPut(context.Context, *TransactionalPutRequest) (*TransactionalPutResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method TransactionalPut not implemented")
+}
+func (UnimplementedConsensaKVServer) mustEmbedUnimplementedConsensaKVServer() {}
+func (UnimplementedConsensaKVServer) testEmbeddedByValue()                    {}
+
+// UnsafeConsensaKVServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ConsensaKVServer will
+// result in compilation errors.
+type UnsafeConsensaKVServer interface {
+	mustEmbedUnimplementedConsensaKVServer()
+}
+
+func RegisterConsensaKVServer(s grpc.ServiceRegistrar, srv ConsensaKVServer) {
+	// If the following call pancis, it indicates UnimplementedConsensaKVServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&ConsensaKV_ServiceDesc, srv)
+}
+
+func _ConsensaKV_TransactionalPut_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TransactionalPutRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ConsensaKVServer).TransactionalPut(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ConsensaKV_TransactionalPut_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ConsensaKVServer).TransactionalPut(ctx, req.(*TransactionalPutRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// ConsensaKV_ServiceDesc is the grpc.ServiceDesc for ConsensaKV service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ConsensaKV_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "consensa.v1.ConsensaKV",
+	HandlerType: (*ConsensaKVServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "TransactionalPut",
+			Handler:    _ConsensaKV_TransactionalPut_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "api/consensa/v1/consensa.proto",
+}
