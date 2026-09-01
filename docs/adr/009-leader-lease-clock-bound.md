@@ -32,6 +32,13 @@ serve a lease read on the hope that clocks are close enough.
   permit two nodes to believe incompatible lease intervals are valid.
 - Tests must deliberately violate the bound and demonstrate that the code rejects the
   lease path; this is not a failure mode a happy-path benchmark can establish.
-- The current implementation exposes lease/closed-timestamp admission predicates and a
-  conservative `ReadIndex` fallback. Live lease grant/revocation replication remains
-  unfinished and therefore cannot yet be advertised as a complete follower-read system.
+- **Update: live lease grant replication, closed-timestamp advancement, and an actual
+  follower-read path are now implemented and proven against a real 3-node group** --
+  `DurableRange.GrantLease`/`AdvanceClosedTimestamp`/`FollowerRead`
+  (`internal/kv/durable_range.go`), `TestFollowerReadServesOnceLeasedAndClosed`. What
+  remains genuinely unfinished: lease *revocation* on leadership change (a deposed
+  leader's granted lease simply expires on its own clock rather than being actively
+  invalidated), a real production policy for how often to advance the closed timestamp
+  (currently the caller's choice, uncalled by any running binary), and a client-facing
+  RPC surface for follower reads. The admission predicates and `ReadIndex` fallback this
+  ADR originally described are unchanged.

@@ -85,12 +85,15 @@ the design decisions and their reasoning, including ones later sessions overturn
 - **Formally verified quorum-intersection and split-invariant properties.** `specs/`
   holds TLA+ models for joint-consensus quorum intersection and recursive range
   splitting, each checked by TLC with a required negative control that must fail.
-- **Lease grants are real, Raft-replicated state.** `DurableRange.GrantLease` proposes a
-  lease through the same replicated command log `Put`/`Delete` use; every replica in a
-  real 3-node group converges on the identical holder and interval, checked against
-  `lease.go`'s clock-bounded validity logic. Closed-timestamp advancement and an actual
-  follower-read RPC path are not built on top of it yet -- see
-  `docs/notes/09-leases.md`.
+- **Real follower reads, the full read-path ladder closed end to end.** Lease grants,
+  closed-timestamp advancement, and `DurableRange.FollowerRead` are all real,
+  Raft-replicated operations proven against a real 3-node group:
+  `TestFollowerReadServesOnceLeasedAndClosed` checks every rejection path (no lease; lease
+  but no closed timestamp; a replica that isn't the lease's intended holder even once
+  caught up) as well as the success path -- a follower answering a read entirely from its
+  own local storage, no leader round trip. Still missing: lease revocation on leadership
+  change, a production policy for how often to advance the closed timestamp, and a
+  client-facing RPC for it -- see `docs/notes/09-leases.md`.
 - **A reproduced write-skew anomaly is now actually prevented, not just documented, on
   both participants.** `Store.WriteIntent` and `DurableStore.WriteIntent` both reject a
   write whose timestamp collides with an already-recorded read on the same key;
@@ -118,7 +121,8 @@ membership changes wired into the live voting path (the quorum math exists and i
 unit-tested, `internal/raft/membership.go`, but nothing calls it yet); serializable isolation is partially closed (Phase 14 -- both `Store` and `DurableStore`
 now reject the specific write that completes a reproduced write-skew anomaly,
 conservatively, without full SSI's permissive schedule analysis or read-refresh; see
-`docs/notes/14-serializable.md`); lease grants replicate correctly but nothing yet
-advances a closed timestamp or serves an actual follower read off one. ANN search is approximate by construction and
-is never described as linearizable; only the register/KV plane makes that claim, and only
-where a test backs it.
+`docs/notes/14-serializable.md`); follower reads work end to end at the `DurableRange`
+layer but no running binary calls `AdvanceClosedTimestamp` on a real interval yet, and
+lease revocation on leadership change is not implemented. ANN search is approximate by
+construction and is never described as linearizable; only the register/KV plane makes
+that claim, and only where a test backs it.

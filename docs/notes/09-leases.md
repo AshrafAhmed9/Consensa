@@ -73,10 +73,31 @@ and that `FollowerReadAllowedWithOffset` correctly accepts a read inside the lea
 interval and rejects one after expiry, against the replicated lease rather than the
 in-memory model alone.
 
-**What is still not built, stated plainly:** there is still no closed-timestamp
-advancement (nothing periodically proposes an updated `ClosedTimestamp` as the leader
-keeps committing), and no actual follower-read RPC path serves a client from anything but
-the leader -- `GrantLease`/`CurrentLease` close lease *replication* specifically, not the
-whole read-path ladder. `Host.AppliedIndex()` still does not exist as a public accessor,
-which closed-timestamp advancement would need to know how far a given replica has
-actually caught up.
+**Update: the whole ladder now closes end to end at the `DurableRange` layer.**
+`AdvanceClosedTimestamp` proposes a `commandClosedTimestamp` through the identical
+Raft-replicated wire format -- each replica pairs the leader-fixed `Timestamp` with its
+own `entry.Index` at apply time, since how far *this* replica has applied is inherently
+per-replica even though the promise itself is not. `DurableRange.AppliedIndex()` closes
+the `Host.AppliedIndex()` gap directly on `DurableRange` (tracked via the existing
+`Apply` callback) rather than adding it to `raft.Host`'s own surface -- no change to
+`Host` was needed. `DurableRange.FollowerRead(key, readAt, maxOffset)` ties all of it
+together: it serves `key` from local storage only when
+`FollowerReadAllowedWithOffset` says a valid, *replicated* lease is held by this exact
+replica, this replica's applied index has caught up to the closed-timestamp promise, and
+`readAt` doesn't exceed it.
+
+`TestFollowerReadServesOnceLeasedAndClosed` proves this against a real 3-node group,
+checking every rejection path, not just the success path: `FollowerRead` fails with no
+lease; still fails with a lease but no closed timestamp; succeeds once both have
+replicated and applied; and fails again on a replica that is not the lease's intended
+holder (the leader itself) even though the identical closed timestamp has applied there
+too -- proving the check is genuinely per-holder, not "any caught-up replica."
+
+**What is still not built, stated plainly:** no policy for how often or how far behind
+"now" to call `AdvanceClosedTimestamp` -- left to the caller, and no caller in
+`cmd/consensa` calls it on a real interval yet, so this is proven at the `DurableRange`
+unit-test layer, not yet exercised by the running binary. No lease revocation or handoff
+on leadership change (a lease granted by a leader that then loses leadership is not
+actively invalidated -- it simply expires on its own clock). No RPC surface exposes
+`FollowerRead` to a network client the way `ConsensaKV.TransactionalPut` exposes 2PC;
+this closes the mechanism, not the client-facing API on top of it.
