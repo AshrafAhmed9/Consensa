@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/ashraf/consensa/internal/raft"
 )
@@ -161,12 +162,23 @@ type commandType string
 const (
 	commandPut    commandType = "put"
 	commandDelete commandType = "delete"
+	commandLease  commandType = "lease"
 )
 
+// rangeCommand's lease fields carry a Lease grant (see lease.go) through the same
+// Raft-replicated wire format as Put/Delete: a lease is only safe to act on once every
+// replica agrees the leader actually granted it, which is exactly the ordering guarantee
+// Raft already gives ordinary writes. Timestamps are absolute (RFC3339Nano wall-clock
+// values assigned once by the proposing leader), not re-derived per replica, so every
+// replica applies the identical lease interval regardless of when it individually applies
+// the entry.
 type rangeCommand struct {
-	Type  commandType `json:"type"`
-	Key   []byte      `json:"key"`
-	Value []byte      `json:"value,omitempty"`
+	Type            commandType `json:"type"`
+	Key             []byte      `json:"key,omitempty"`
+	Value           []byte      `json:"value,omitempty"`
+	LeaseHolder     raft.NodeID `json:"lease_holder,omitempty"`
+	LeaseStart      time.Time   `json:"lease_start,omitempty"`
+	LeaseExpiration time.Time   `json:"lease_expiration,omitempty"`
 }
 
 var rangeCommandPrefix = []byte("consensa/kv/v1:")
@@ -196,6 +208,10 @@ func (s *rangeState) apply(data []byte) error {
 		s.values[string(command.Key)] = bytes.Clone(command.Value)
 	case commandDelete:
 		delete(s.values, string(command.Key))
+	case commandLease:
+		// This in-memory harness models Put/Delete convergence only; lease-holder
+		// state is tracked by DurableRange (see durable_range.go), the real
+		// replicated implementation these tests don't exercise.
 	default:
 		return errors.New("kv: unknown range command")
 	}
@@ -217,7 +233,9 @@ func decodeRangeCommand(data []byte) (rangeCommand, bool, error) {
 	if err := json.Unmarshal(data[len(rangeCommandPrefix):], &command); err != nil {
 		return rangeCommand{}, false, err
 	}
-	if len(command.Key) == 0 {
+	// A lease grant carries no Key -- it authorizes a holder over the whole range, not one
+	// entry -- so the empty-key rejection below only applies to Put/Delete.
+	if command.Type != commandLease && len(command.Key) == 0 {
 		return rangeCommand{}, false, errors.New("kv: command has empty key")
 	}
 	return command, true, nil

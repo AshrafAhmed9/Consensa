@@ -227,7 +227,13 @@ func TestDurableRangeDeleteIsDurable(t *testing.T) {
 	}
 	stop := make(chan struct{})
 	wg := driveRanges(live, 10*time.Millisecond, stop)
-	defer func() { close(stop); wg.Wait(); for _, r := range live { _ = r.Close() } }()
+	defer func() {
+		close(stop)
+		wg.Wait()
+		for _, r := range live {
+			_ = r.Close()
+		}
+	}()
 
 	if err := putUntilAccepted(live, []byte("x"), []byte("temporary"), 20*time.Second); err != nil {
 		t.Fatalf("put: %v", err)
@@ -367,6 +373,79 @@ func TestAllKeysExcludesReservedNamespaceAndReflectsDeletes(t *testing.T) {
 			t.Fatalf("AllKeys never reflected the delete of b, last=%v err=%v", all, err)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestGrantLeaseReplicatesToEveryReplica proves a lease grant is a real Raft-committed
+// operation, not just local bookkeeping: every replica in the group -- not just the
+// granting leader -- ends up with the identical Holder/Start/Expiration once the grant
+// commits, and FollowerReadAllowedWithOffset (lease.go) correctly accepts a read against
+// the replicated lease before expiry and rejects one after it. This proves lease
+// replication itself; it does not exercise closed-timestamp advancement or an actual
+// follower-read RPC path, neither of which exists yet (see GrantLease's doc comment).
+func TestGrantLeaseReplicatesToEveryReplica(t *testing.T) {
+	ids := []raft.NodeID{1, 2, 3}
+	group := startDurableRangeGroup(t, 1, nil, nil, ids)
+	defer group.closeAll(t)
+
+	stop := make(chan struct{})
+	wg := driveRanges(group.list(), 10*time.Millisecond, stop)
+	defer func() { close(stop); wg.Wait() }()
+
+	var leader *DurableRange
+	deadline := time.Now().Add(20 * time.Second)
+	for leader == nil {
+		for _, r := range group.list() {
+			if role, _ := r.Status(); role == raft.Leader {
+				leader = r
+				break
+			}
+		}
+		if leader == nil {
+			if time.Now().After(deadline) {
+				t.Fatal("no leader elected")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	var grantErr error
+	deadline = time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if grantErr = leader.GrantLease(1, 5*time.Second); grantErr == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if grantErr != nil {
+		t.Fatalf("leader never accepted GrantLease: %v", grantErr)
+	}
+
+	deadline = time.Now().Add(20 * time.Second)
+	for {
+		allConverged := true
+		for _, r := range group.list() {
+			lease := r.CurrentLease()
+			if lease.Holder != raft.NodeID(1) || lease.Expiration.IsZero() {
+				allConverged = false
+			}
+		}
+		if allConverged {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("lease grant never replicated to every replica")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	lease := leader.CurrentLease()
+	if err := FollowerReadAllowedWithOffset(lease, 1, ClosedTimestamp{Timestamp: lease.Start, AppliedIndex: 0}, lease.Start, lease.Start, 0, 0); err != nil {
+		t.Fatalf("read at lease.Start should be allowed: %v", err)
+	}
+	afterExpiry := lease.Expiration.Add(time.Second)
+	if err := FollowerReadAllowedWithOffset(lease, 1, ClosedTimestamp{Timestamp: lease.Start, AppliedIndex: 0}, lease.Start, afterExpiry, 0, 0); err == nil {
+		t.Fatal("read after lease expiration should be rejected")
 	}
 }
 

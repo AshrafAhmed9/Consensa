@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/ashraf/consensa/internal/raft"
@@ -35,6 +36,13 @@ const readIndexTimeout = 3 * time.Second
 type DurableRange struct {
 	host *raft.Host
 	db   *storage.DB
+
+	// leaseMu guards currentLease: apply (Host's own goroutine) writes it as lease-grant
+	// commands commit, while CurrentLease is read from whatever goroutine a caller uses
+	// to decide if a follower read is safe -- the same producer/single-or-many-consumer
+	// shape as Go's sync.RWMutex is built for.
+	leaseMu      sync.RWMutex
+	currentLease Lease
 }
 
 // DurableRangeConfig names one replica's identity, group membership, and durable storage.
@@ -107,6 +115,11 @@ func (r *DurableRange) apply(entry raft.Entry) error {
 		return r.db.Put(command.Key, ts, command.Value)
 	case commandDelete:
 		return r.db.Delete(command.Key, ts)
+	case commandLease:
+		r.leaseMu.Lock()
+		r.currentLease = Lease{Holder: command.LeaseHolder, Start: command.LeaseStart, Expiration: command.LeaseExpiration}
+		r.leaseMu.Unlock()
+		return nil
 	default:
 		return errors.New("kv: unknown range command")
 	}
@@ -184,6 +197,43 @@ func (r *DurableRange) AllKeys() (map[string][]byte, error) {
 		out[string(key)] = append([]byte(nil), it.Value()...)
 	}
 	return out, it.Err()
+}
+
+// GrantLease proposes a lease authorizing holder to serve follower reads over
+// [now, now+duration) once the proposal commits and every replica applies it. Like Put,
+// this only succeeds if this replica is currently the Raft leader -- a lease is only
+// meaningful if the whole group agrees who granted it, and only the leader's proposals
+// can commit. The timestamps are fixed once here by the proposer, not recomputed per
+// replica on apply, so every replica ends up with the identical interval regardless of
+// how staggered their individual apply calls are.
+//
+// What this does NOT implement, stated plainly (see ADR-009 and docs/notes/09-leases.md):
+// there is no closed-timestamp advancement and no follower-read serving path wired to
+// this lease yet -- CurrentLease plus lease.go's FollowerReadAllowedWithOffset give a
+// caller everything needed to check whether a follower read would be safe, but nothing
+// here yet serves one. Granting and replicating the lease itself is the piece this closes.
+func (r *DurableRange) GrantLease(holder raft.NodeID, duration time.Duration) error {
+	if duration <= 0 {
+		return errors.New("kv: lease duration must be positive")
+	}
+	now := time.Now()
+	data, err := marshalRangeCommand(rangeCommand{
+		Type: commandLease, LeaseHolder: holder, LeaseStart: now, LeaseExpiration: now.Add(duration),
+	})
+	if err != nil {
+		return err
+	}
+	return r.host.Propose(data)
+}
+
+// CurrentLease returns the most recent lease this replica has applied. The zero Lease
+// (no holder, zero times) means no lease has ever been granted and applied here yet --
+// ValidAt/ValidWithOffset both correctly reject it, since a zero Expiration is never
+// after any real now.
+func (r *DurableRange) CurrentLease() Lease {
+	r.leaseMu.RLock()
+	defer r.leaseMu.RUnlock()
+	return r.currentLease
 }
 
 // validateRangeKey rejects an empty key or one that collides with Persister's reserved
