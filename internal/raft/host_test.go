@@ -190,6 +190,21 @@ func waitForCount(t *testing.T, log *applyLog, id NodeID, want int, deadline tim
 	t.Fatalf("node %d: applied %d entries, want at least %d within %s", id, log.count(id), want, deadline)
 }
 
+// waitForLast waits for a particular command rather than an entry count. A crash test can
+// legitimately commit its leader-discovery probe before the crash, so a count alone does
+// not establish that the later post-failure command has reached the state machine.
+func waitForLast(t *testing.T, log *applyLog, id NodeID, want string, deadline time.Duration) {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
+		if string(log.last(id)) == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("node %d: most recent applied entry is %q, want %q within %s", id, log.last(id), want, deadline)
+}
+
 // TestHostTCPClusterElectsAndReplicates proves the production transport, not just the pure
 // protocol: three Hosts on real loopback sockets, each backed by its own on-disk storage
 // engine via Persister, must elect a leader and replicate a proposal's exact bytes to every
@@ -357,10 +372,7 @@ func TestHostTCPClusterSurvivesLeaderFailure(t *testing.T) {
 	// hold, deterministically, is that the surviving majority keeps making progress: at
 	// least the pre-failure entry plus the post-failure one.
 	for _, h := range others {
-		waitForCount(t, log, h.id, 2, 15*time.Second)
-		if got := log.last(h.id); string(got) != "after failure" {
-			t.Fatalf("node %d: most recent applied entry is %q, want %q", h.id, got, "after failure")
-		}
+		waitForLast(t, log, h.id, "after failure", 15*time.Second)
 	}
 
 	close(stop)
