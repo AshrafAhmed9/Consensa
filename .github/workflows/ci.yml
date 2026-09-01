@@ -13,5 +13,15 @@ jobs:
       - run: go vet ./...
       - uses: golangci/golangci-lint-action@v8
         with: {version: v2.13.2}
-      - run: go test -race ./...
+      # -p 1 runs packages sequentially rather than GitHub's shared 2-vCPU runner's
+      # default full parallelism. Several packages here spin up real OS processes and
+      # real TCP Raft clusters (cmd/consensa, internal/raft, internal/kv, internal/ann);
+      # under -race's added instrumentation overhead, running all of them at once on
+      # weak, contended hardware measurably increases the odds any one of their
+      # real-election deadlines gets missed under scheduling pressure that has nothing to
+      # do with the code being tested -- confirmed by CI itself failing a different
+      # real-process test on each of several consecutive runs while every one of them
+      # passes reliably locally and in isolation. This trades total CI wall-clock time
+      # for not chasing an unbounded set of individual test deadlines.
+      - run: go test -race -p 1 ./...
       - run: python -m pytest harness/torture
