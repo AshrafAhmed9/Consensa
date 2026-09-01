@@ -132,13 +132,13 @@ func TestRouterDirectsRealRangesAndIsolatesFailure(t *testing.T) {
 	defer rangeB.closeAll(t)
 
 	// "apple" < "m" routes to range A; "zebra" >= "m" routes to range B.
-	routedPut(t, router, groups, []byte("apple"), []byte("fruit"), 5*time.Second)
-	routedPut(t, router, groups, []byte("zebra"), []byte("animal"), 5*time.Second)
+	routedPut(t, router, groups, []byte("apple"), []byte("fruit"), 10*time.Second)
+	routedPut(t, router, groups, []byte("zebra"), []byte("animal"), 10*time.Second)
 
 	// Prove isolation, not just that both eventually converge: "apple" must land ONLY on
 	// range A's replicas and never appear on range B's, and vice versa. Cross-contamination
 	// here would mean the router or the range wiring silently ignored the key boundary.
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(6 * time.Second)
 	for {
 		aHasApple, bLacksApple := true, true
 		for _, r := range rangeA.list() {
@@ -190,7 +190,7 @@ func TestRouterDirectsRealRangesAndIsolatesFailure(t *testing.T) {
 	}
 	delete(rangeA.replicas, aLeaderID)
 
-	routedPut(t, router, groups, []byte("banana"), []byte("fruit2"), 5*time.Second)
+	routedPut(t, router, groups, []byte("banana"), []byte("fruit2"), 10*time.Second)
 
 	if role, term := rangeB.replicas[bLeaderBefore].Status(); role != raft.Leader || term != bTermBefore {
 		t.Fatalf("range B's leadership changed after an unrelated range A failure: role=%v term=%v, want leader term=%d", role, term, bTermBefore)

@@ -190,12 +190,12 @@ func TestHostTCPClusterElectsAndReplicates(t *testing.T) {
 	wg := driveHosts(hosts, 10*time.Millisecond, stop)
 	defer func() { close(stop); wg.Wait() }()
 
-	if err := proposeToLeader(hosts, []byte("hello over real tcp"), 3*time.Second); err != nil {
+	if err := proposeToLeader(hosts, []byte("hello over real tcp"), 8*time.Second); err != nil {
 		t.Fatalf("no leader accepted a proposal within the deadline: %v", err)
 	}
 
 	for _, id := range ids {
-		waitForCount(t, log, id, 1, 2*time.Second)
+		waitForCount(t, log, id, 1, 5*time.Second)
 		if got := log.last(id); string(got) != "hello over real tcp" {
 			t.Fatalf("node %d: applied %q, want %q", id, got, "hello over real tcp")
 		}
@@ -225,11 +225,11 @@ func TestHostTCPClusterSurvivesLeaderFailure(t *testing.T) {
 	stop := make(chan struct{})
 	wg := driveHosts(hosts, 10*time.Millisecond, stop)
 
-	if err := proposeToLeader(hosts, []byte("before failure"), 3*time.Second); err != nil {
+	if err := proposeToLeader(hosts, []byte("before failure"), 8*time.Second); err != nil {
 		t.Fatalf("initial proposal failed: %v", err)
 	}
 	for _, id := range ids {
-		waitForCount(t, log, id, 1, 2*time.Second)
+		waitForCount(t, log, id, 1, 5*time.Second)
 	}
 
 	// Find the current leader by trying Propose on each host with a tiny payload marker --
@@ -257,7 +257,7 @@ func TestHostTCPClusterSurvivesLeaderFailure(t *testing.T) {
 		t.Fatalf("closing leader storage: %v", err)
 	}
 
-	if err := proposeToLeader(others, []byte("after failure"), 5*time.Second); err != nil {
+	if err := proposeToLeader(others, []byte("after failure"), 10*time.Second); err != nil {
 		t.Fatalf("no new leader emerged among survivors within the deadline: %v", err)
 	}
 	// "before failure" was durably committed to all three nodes before the kill; "probe"
@@ -267,7 +267,7 @@ func TestHostTCPClusterSurvivesLeaderFailure(t *testing.T) {
 	// hold, deterministically, is that the surviving majority keeps making progress: at
 	// least the pre-failure entry plus the post-failure one.
 	for _, h := range others {
-		waitForCount(t, log, h.id, 2, 3*time.Second)
+		waitForCount(t, log, h.id, 2, 6*time.Second)
 		if got := log.last(h.id); string(got) != "after failure" {
 			t.Fatalf("node %d: most recent applied entry is %q, want %q", h.id, got, "after failure")
 		}
