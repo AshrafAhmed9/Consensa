@@ -201,3 +201,90 @@ func TestMultiplexedTransportRoutesRangesIndependently(t *testing.T) {
 		}
 	}
 }
+
+// TestMultiplexedTransportPoolsOutboundConnections proves the batching half of Phase 3's
+// claim this type's own doc comment names: two different ranges on the same sending node,
+// both delivering messages to the same destination node, reuse one persistent outbound
+// TCP connection rather than each dialing its own -- and every message sent over it still
+// arrives at the correct range on the receiving side. Without connection reuse, a node
+// hosting many ranges would re-dial once per message per range per heartbeat, exactly the
+// "1,000 ranges must not mean 1,000x heartbeat traffic" cost PLAN.md's Phase 3 section
+// warns against.
+func TestMultiplexedTransportPoolsOutboundConnections(t *testing.T) {
+	receiverTransport, err := ListenMultiplexed(2, "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer receiverTransport.Close()
+
+	type received struct {
+		rangeID uint64
+		message Message
+	}
+	var mu sync.Mutex
+	var got []received
+	record := func(rangeID uint64) func(Message) error {
+		return func(m Message) error {
+			mu.Lock()
+			got = append(got, received{rangeID, m})
+			mu.Unlock()
+			return nil
+		}
+	}
+	receiverView1 := receiverTransport.Register(10, nil)
+	receiverView1.SetHandler(record(10))
+	receiverView2 := receiverTransport.Register(20, nil)
+	receiverView2.SetHandler(record(20))
+
+	senderTransport, err := ListenMultiplexed(1, "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer senderTransport.Close()
+
+	peers := map[NodeID]string{2: receiverTransport.Addr().String()}
+	senderView1 := senderTransport.Register(10, peers)
+	senderView2 := senderTransport.Register(20, peers)
+
+	for i := 0; i < 5; i++ {
+		if err := senderView1.Send(Message{Type: MsgAppend, From: 1, To: 2, Term: uint64(i)}); err != nil {
+			t.Fatalf("range 10 send %d: %v", i, err)
+		}
+		if err := senderView2.Send(Message{Type: MsgAppend, From: 1, To: 2, Term: uint64(i)}); err != nil {
+			t.Fatalf("range 20 send %d: %v", i, err)
+		}
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(got)
+		mu.Unlock()
+		if n == 10 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of 10 messages ever arrived", n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	mu.Lock()
+	for _, r := range got {
+		if r.rangeID != 10 && r.rangeID != 20 {
+			t.Fatalf("message delivered under unexpected range ID %d", r.rangeID)
+		}
+	}
+	mu.Unlock()
+
+	// The actual pooling claim: 10 sends across two ranges to the same destination
+	// address opened exactly one outbound connection, not ten -- checked directly against
+	// the sender's own connection pool rather than inferred indirectly, since this is a
+	// same-package white-box test.
+	senderTransport.mu.Lock()
+	numConns := len(senderTransport.conns)
+	senderTransport.mu.Unlock()
+	if numConns != 1 {
+		t.Fatalf("sender pooled %d outbound connections for one destination, want 1", numConns)
+	}
+}

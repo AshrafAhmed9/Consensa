@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"bufio"
 	"bytes"
 	"testing"
 	"time"
@@ -42,7 +43,7 @@ func TestTCPTransportDeliversOneFramedMessage(t *testing.T) {
 func TestReadFrameRejectsOversizedPayload(t *testing.T) {
 	var frame [4]byte
 	frame[0], frame[3] = 1, 1 // 16 MiB + one byte in big-endian form.
-	if _, err := readFrame(bytes.NewReader(frame[:])); err == nil {
+	if _, err := readFrame(bufio.NewReader(bytes.NewReader(frame[:]))); err == nil {
 		t.Fatal("oversized frame accepted")
 	}
 }

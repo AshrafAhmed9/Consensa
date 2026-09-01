@@ -98,7 +98,7 @@ func (t *TCPTransport) accept() {
 
 func (t *TCPTransport) receive(connection net.Conn) {
 	defer func() { _ = connection.Close() }()
-	data, err := readFrame(connection)
+	data, err := readFrame(bufio.NewReader(connection))
 	if err != nil {
 		return
 	}
@@ -122,10 +122,18 @@ func writeFrame(writer io.Writer, data []byte) error {
 	return err
 }
 
-func readFrame(reader io.Reader) ([]byte, error) {
-	buffered := bufio.NewReader(reader)
+// readFrame reads one length-prefixed frame from reader. The caller owns reader's
+// buffering and lifetime -- readFrame used to wrap its argument in a fresh bufio.Reader on
+// every call, which is correct for a connection read exactly once (TCPTransport's
+// original one-frame-per-connection design) but silently drops data on a connection read
+// in a loop: a fresh bufio.Reader's first Read can pull more bytes off the socket than
+// this one frame needs, and discarding that bufio.Reader at return time throws away
+// whatever of the *next* frame it already buffered. MultiplexedTransport's connection
+// pooling (multiplex.go) reads many frames per connection, which is what surfaced this --
+// found as an actual test failure (9 of 10 messages missing), not by inspection.
+func readFrame(reader *bufio.Reader) ([]byte, error) {
 	var length [4]byte
-	if _, err := io.ReadFull(buffered, length[:]); err != nil {
+	if _, err := io.ReadFull(reader, length[:]); err != nil {
 		return nil, err
 	}
 	size := binary.BigEndian.Uint32(length[:])
@@ -133,7 +141,7 @@ func readFrame(reader io.Reader) ([]byte, error) {
 		return nil, errors.New("raft: message exceeds transport limit")
 	}
 	data := make([]byte, size)
-	if _, err := io.ReadFull(buffered, data); err != nil {
+	if _, err := io.ReadFull(reader, data); err != nil {
 		return nil, err
 	}
 	return data, nil
