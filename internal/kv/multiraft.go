@@ -187,18 +187,9 @@ type rangeState struct{ values map[string][]byte }
 func newRangeState() *rangeState { return &rangeState{values: map[string][]byte{}} }
 
 func (s *rangeState) apply(data []byte) error {
-	if !bytes.HasPrefix(data, rangeCommandPrefix) {
-		// Raft accepts arbitrary application entries. A range host owns only its
-		// namespaced commands, leaving vector and future transactional commands for
-		// their dedicated state-machine adapters.
-		return nil
-	}
-	var command rangeCommand
-	if err := json.Unmarshal(data[len(rangeCommandPrefix):], &command); err != nil {
+	command, ok, err := decodeRangeCommand(data)
+	if err != nil || !ok {
 		return err
-	}
-	if len(command.Key) == 0 {
-		return errors.New("kv: command has empty key")
 	}
 	switch command.Type {
 	case commandPut:
@@ -209,6 +200,27 @@ func (s *rangeState) apply(data []byte) error {
 		return errors.New("kv: unknown range command")
 	}
 	return nil
+}
+
+// decodeRangeCommand recognizes and decodes one range-namespaced Raft entry. ok is false
+// (with a nil error) for an entry outside this namespace -- Raft accepts arbitrary
+// application entries, and a range host owns only its own namespaced commands, leaving
+// room for other command families (vector mutations, future transactional commands) to
+// share the same Raft group in a later phase. Shared by rangeState (the in-memory
+// MultiRaft state machine) and DurableRange (the real-storage state machine in
+// durable_range.go) so both apply byte-identical semantics to the same wire format.
+func decodeRangeCommand(data []byte) (rangeCommand, bool, error) {
+	if !bytes.HasPrefix(data, rangeCommandPrefix) {
+		return rangeCommand{}, false, nil
+	}
+	var command rangeCommand
+	if err := json.Unmarshal(data[len(rangeCommandPrefix):], &command); err != nil {
+		return rangeCommand{}, false, err
+	}
+	if len(command.Key) == 0 {
+		return rangeCommand{}, false, errors.New("kv: command has empty key")
+	}
+	return command, true, nil
 }
 
 func (s *rangeState) get(key []byte) ([]byte, error) {
