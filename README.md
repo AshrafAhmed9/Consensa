@@ -72,6 +72,16 @@ the design decisions and their reasoning, including ones later sessions overturn
   search leakage, and recall staying high after the split; the KV plane (`DurableRange`)
   shows no key lost or duplicated and no cross-boundary key surviving in either child,
   reading the parent's real state via `DurableRange.AllKeys()`.
+- **Multi-range outbound connections are pooled, not dialed per message.** Ranges on one
+  node sharing a destination now reuse one persistent TCP connection
+  (`MultiplexedTransport`'s `connFor`/`pooledConn`) instead of each `Send` dialing fresh --
+  `cmd/consensa`'s own shared listener already uses this transport, so the fix applies to
+  the real binary. Fixing the receiving side to read many frames per pooled connection
+  surfaced and fixed two real bugs: a `bufio.Reader` re-wrapped on every read that
+  silently dropped bytes, and cross-range head-of-line blocking from dispatching a
+  received frame synchronously off the shared connection's one read goroutine (each range
+  now has its own inbox and worker). Coalescing multiple ranges' messages into a single
+  wire frame remains out of scope.
 - **Formally verified quorum-intersection and split-invariant properties.** `specs/`
   holds TLA+ models for joint-consensus quorum intersection and recursive range
   splitting, each checked by TLC with a required negative control that must fail.
@@ -93,11 +103,12 @@ the design decisions and their reasoning, including ones later sessions overturn
 ## What is explicitly not done yet
 
 Stated plainly rather than left implied by omission: no automatic range-split trigger or
-live traffic cutover; no multi-range transport batching beyond a shared listener (every
-range still dials its own outbound connections); no joint-consensus membership changes
-wired into the live voting path (the quorum math exists and is unit-tested,
-`internal/raft/membership.go`, but nothing calls it yet); no serializable isolation
-(Phase 14 -- snapshot isolation's write-skew gap is reproduced as a test, not yet
-closed). ANN search
-is approximate by construction and is never described as linearizable; only the
-register/KV plane makes that claim, and only where a test backs it.
+live traffic cutover; outbound connections are now pooled per destination, but multiple
+ranges' messages are still never coalesced into a single wire frame; no joint-consensus
+membership changes wired into the live voting path (the quorum math exists and is
+unit-tested, `internal/raft/membership.go`, but nothing calls it yet); no serializable
+isolation (Phase 14 -- snapshot isolation's write-skew gap is reproduced as a test, not
+yet closed); lease grants replicate correctly but nothing yet advances a closed timestamp
+or serves an actual follower read off one. ANN search is approximate by construction and
+is never described as linearizable; only the register/KV plane makes that claim, and only
+where a test backs it.

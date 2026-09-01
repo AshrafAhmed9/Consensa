@@ -70,16 +70,35 @@ message TCP churn on loopback caused elections/replication to fail outright abou
 the time; slowing to the 10ms interval this codebase's other TCP-backed tests already use
 made it reliable across 16 consecutive runs.
 
-**What this does not close, stated plainly:** batched heartbeat coalescing across ranges
-sharing a destination node -- the other half of the plan's "1,000 ranges must not mean
-1,000x heartbeat traffic" claim -- is not attempted; every range's Host still calls `Send`
-independently and each `Send` still dials its own outbound connection per message, same
-as `TCPTransport`. `kv.DurableRange` also does not use `MultiplexedTransport` yet --
-`multiplex.go` is proven at the `raft.Host` layer only, the same
-built-but-not-yet-wired-into-a-real-deployment-binary pattern this project has hit
-several times before it closed it. Nothing durable is wired into a real binary yet
-either -- `cmd/consensa` still only runs a single `DurableNode`, not a routed, multi-range
-deployment. Replica movement and dynamic range policy also remain later work.
+**Update: outbound connection pooling closes the other half of that claim.** Every range's
+`Send` used to dial its own fresh TCP connection per message, per destination -- exactly
+the "1,000 ranges must not mean 1,000x heartbeat traffic" cost this file used to say was
+untouched. Ranges sharing a destination node now share one persistent outbound
+connection (`connFor`/`pooledConn` in `multiplex.go`), and the receiving side reads many
+frames off one connection instead of accepting-and-closing per message.
+`TestMultiplexedTransportPoolsOutboundConnections` proves it directly: 10 sends across
+two ranges to one destination open exactly one outbound connection, not ten.
+
+Reading multiple frames per connection surfaced two real bugs the single-frame design had
+never exercised, both fixed rather than routed around: `readFrame` used to wrap its
+argument in a brand-new `bufio.Reader` on every call, which silently drops bytes already
+read ahead into a discarded reader's buffer when the same connection is read in a loop
+(now takes a `*bufio.Reader` the caller owns and reuses); and dispatching a received frame
+straight to its range's handler from the shared connection's one read goroutine created
+real cross-range head-of-line blocking that a dedicated-connection-per-range design never
+had -- caught as an actual intermittent test failure, not by inspection, and fixed by
+giving each range its own bounded inbox and worker goroutine so the shared read loop only
+enqueues and moves on. What this still does not do: coalesce multiple ranges' messages
+into a single wire frame -- each message is still its own frame, just sent over an
+already-open connection instead of a freshly dialed one.
+
+**What still doesn't close, stated plainly:** `cmd/consensa` (`main.go`) already calls
+`raft.ListenMultiplexed` for its one shared per-process listener, so this pooling change
+applies directly to the real deployed binary, not just to `multiplex_test.go` -- but the
+binary's own end-to-end test does not specifically assert connection reuse, only that the
+vector and KV planes both work correctly over the shared listener; the reuse claim itself
+is proven at the `raft.Host`-layer unit test (`TestMultiplexedTransportPoolsOutboundConnections`).
+Replica movement and dynamic range policy remain later work.
 
 ## What can fail?
 
