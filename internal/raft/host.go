@@ -14,6 +14,12 @@ type HostConfig struct {
 	Peers         map[NodeID]string
 	Persister     *Persister
 	Apply         func(Entry) error
+	// Transport, if set, is used instead of NewHost dialing its own dedicated TCP
+	// listener -- this is what lets multiple ranges' Hosts on the same node share one
+	// real listener through a *MultiplexedTransport (see multiplex.go) instead of each
+	// opening its own socket. ListenAddress and Peers are ignored when Transport is set;
+	// the caller already resolved addressing when it built the shared transport.
+	Transport Transport
 }
 
 // Host owns the serialization point between a Raft state machine and real I/O. It has no
@@ -22,13 +28,14 @@ type Host struct {
 	mu        sync.Mutex
 	node      Node
 	persister *Persister
-	transport *TCPTransport
+	transport Transport
 	apply     func(Entry) error
 }
 
-// NewHost starts a TCP listener and restores its node before accepting messages. The
-// recovery-before-listen order prevents a rebooted node from answering an RPC using an
-// empty term or log after durable state already exists on disk.
+// NewHost restores its node before accepting messages, then either starts a dedicated TCP
+// listener or attaches to a caller-supplied shared Transport. The recovery-before-listen
+// order prevents a rebooted node from answering an RPC using an empty term or log after
+// durable state already exists on disk.
 func NewHost(config HostConfig) (*Host, error) {
 	if config.Persister == nil || config.Apply == nil {
 		return nil, errors.New("raft: host persister and apply callback required")
@@ -38,6 +45,10 @@ func NewHost(config HostConfig) (*Host, error) {
 		return nil, err
 	}
 	host := &Host{node: node, persister: config.Persister, apply: config.Apply}
+	if config.Transport != nil {
+		host.transport = config.Transport
+		return host, nil
+	}
 	transport, err := ListenTCP(config.Raft.ID, config.ListenAddress, config.Peers, host.Step)
 	if err != nil {
 		return nil, err

@@ -52,13 +52,34 @@ inconsistency introduced for convenience, not a real simplification. The test's 
 `routedPut` helper plays the client's role, the same way `upsertUntilAccepted` does in
 `cmd/consensa/main_e2e_test.go`.
 
-Still genuinely missing, unchanged in kind from before: **one range still means one Raft
-transport** (one TCP listener, one storage directory) -- proven routing and proven
-isolation are not the same claim as the multi-range multiplexing the plan actually calls
-for (many ranges sharing one transport with batched cross-range heartbeats). Nothing
-durable is wired into a real binary yet either -- `cmd/consensa` still only runs a single
-`DurableNode`, not a routed, multi-range deployment. Replica movement and dynamic range
-policy also remain later work.
+**Update: "one range means one transport" is now half-closed.** `MultiplexedTransport`
+(`internal/raft/multiplex.go`) is one real TCP listener per node, shared by every range
+Host on it, instead of each range's Host dialing its own dedicated socket. `Host` was
+refactored to accept an injectable `Transport` interface (`transport.go`) rather than a
+concrete `*TCPTransport`, so this required no change to `Host`'s own protocol logic --
+existing callers that don't set `HostConfig.Transport` are unaffected and still get a
+dedicated listener, exactly as before.
+`TestMultiplexedTransportRoutesRangesIndependently` proves two ranges sharing one real
+listener per node (3 nodes, confirmed via `Addr()` returning exactly 3 distinct
+addresses, not 6) each elect independently and never cross-contaminate committed
+data -- checked by recording every entry each replica actually applies, per range, and
+asserting range A's replicas never see range B's proposed value or vice versa, not just
+that both ranges' terms progressed. A real, repeatable flake was found and fixed while
+building this test: at a 5ms tick interval across two ranges' worth of hosts, dial-per-
+message TCP churn on loopback caused elections/replication to fail outright about 40% of
+the time; slowing to the 10ms interval this codebase's other TCP-backed tests already use
+made it reliable across 16 consecutive runs.
+
+**What this does not close, stated plainly:** batched heartbeat coalescing across ranges
+sharing a destination node -- the other half of the plan's "1,000 ranges must not mean
+1,000x heartbeat traffic" claim -- is not attempted; every range's Host still calls `Send`
+independently and each `Send` still dials its own outbound connection per message, same
+as `TCPTransport`. `kv.DurableRange` also does not use `MultiplexedTransport` yet --
+`multiplex.go` is proven at the `raft.Host` layer only, the same
+built-but-not-yet-wired-into-a-real-deployment-binary pattern this project has hit
+several times before it closed it. Nothing durable is wired into a real binary yet
+either -- `cmd/consensa` still only runs a single `DurableNode`, not a routed, multi-range
+deployment. Replica movement and dynamic range policy also remain later work.
 
 ## What can fail?
 
