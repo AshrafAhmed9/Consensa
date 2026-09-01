@@ -24,10 +24,22 @@ type Entry struct {
 // caused by it reaches the network, otherwise a reboot can contradict an acknowledged vote.
 type HardState struct{ Term, Vote, Commit uint64 }
 
-// Snapshot replaces all log entries through Index with application state.
+// ConfState is the Raft membership state captured with a Snapshot. A snapshot discards
+// the log entries that established its configuration, so treating membership as only
+// log-derived would make a restored replica silently return to its startup configuration.
+// Old must be non-empty when a snapshot carries configuration; an empty ConfState denotes
+// a legacy snapshot and leaves the configured initial membership in effect.
+type ConfState struct {
+	Old, New []NodeID
+	Joint    bool
+}
+
+// Snapshot replaces all log entries through Index with application state and the
+// membership state effective at that index.
 type Snapshot struct {
 	Index, Term uint64
 	Data        []byte
+	ConfState   ConfState
 }
 
 // MessageType enumerates Raft RPCs plus local proposal messages.
@@ -56,8 +68,8 @@ type Message struct {
 	Snapshot                     Snapshot
 }
 
-// Config defines one fixed Raft group. Election ticks should be several heartbeats to
-// avoid stable leaders being replaced by ordinary heartbeat jitter.
+// Config defines a Raft group's initial peer universe. Election ticks should be several
+// heartbeats to avoid stable leaders being replaced by ordinary heartbeat jitter.
 type Config struct {
 	ID    NodeID
 	Peers []NodeID
@@ -67,11 +79,9 @@ type Config struct {
 	// a brand-new, empty replica directly as a voter temporarily WEAKENS fault tolerance
 	// (the cluster now needs a majority that includes a replica that has nothing yet),
 	// where adding it as a learner first does not, since quorum() never counts it. Every
-	// ID in Learners must also appear in Peers; promoting a learner to a voter is done by
-	// constructing a new Config without it in Learners, not by a live reconfiguration
-	// command -- that step (and the disjoint-majority-safe joint-consensus transition a
-	// live add/remove voter change needs) is Membership's (membership.go) job, and it is
-	// deliberately still not wired into this quorum path; see docs/adr/010-learners.md.
+	// ID in Learners must also appear in Peers. A live reconfiguration may promote an
+	// existing learner or change voters, but cannot add an ID outside this transport-known
+	// peer universe.
 	Learners                    []NodeID
 	ElectionTick, HeartbeatTick int
 }

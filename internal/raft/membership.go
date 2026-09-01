@@ -44,6 +44,26 @@ func (m *Membership) LeaveJoint() error {
 	m.Joint = false
 	return nil
 }
+
+// Voters returns every node ID that is a legitimate voter under this configuration: Old
+// alone when stable, or Old union New while Joint. This is deliberately broader than
+// "who can make something commit" (HasQuorum requires a majority of EACH set
+// separately) -- a member of New that isn't in Old yet may still grant a vote or
+// acknowledge a log entry, and its participation is exactly what a majority-of-New check
+// needs to ever be satisfiable during the joint phase.
+func (m Membership) Voters() map[NodeID]bool {
+	out := map[NodeID]bool{}
+	for id := range m.Old {
+		out[id] = true
+	}
+	if m.Joint {
+		for id := range m.New {
+			out[id] = true
+		}
+	}
+	return out
+}
+
 func majority(set map[NodeID]bool, votes map[NodeID]bool) bool {
 	n := 0
 	for id := range set {

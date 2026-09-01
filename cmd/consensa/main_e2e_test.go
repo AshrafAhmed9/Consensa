@@ -15,6 +15,7 @@ import (
 	"time"
 
 	consensav1 "github.com/ashraf/consensa/api/consensa/v1"
+	"github.com/ashraf/consensa/internal/raft"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -28,6 +29,20 @@ import (
 //
 // It is skipped in -short mode: building a binary and running three real processes through a
 // real election is inherently slower than a unit test and does not belong in a fast inner loop.
+
+func TestParseLearners(t *testing.T) {
+	peers := map[raft.NodeID]string{1: "a", 2: "b", 3: "c"}
+	got, err := parseLearners("3,2,3", peers)
+	if err != nil || len(got) != 2 || got[0] != 3 || got[1] != 2 {
+		t.Fatalf("parseLearners valid = %#v, %v", got, err)
+	}
+	if _, err := parseLearners("4", peers); err == nil {
+		t.Fatal("unknown learner accepted")
+	}
+	if _, err := parseLearners("1,2,3", peers); err == nil {
+		t.Fatal("all-learner configuration accepted")
+	}
+}
 
 func freePort(t *testing.T) int {
 	t.Helper()

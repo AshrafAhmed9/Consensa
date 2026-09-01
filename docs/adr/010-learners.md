@@ -1,13 +1,11 @@
-# ADR 010: wire learners into the live quorum path, defer joint consensus itself
+# ADR 010: learners first, then live joint consensus
 
 ## Context
 
-`internal/raft/membership.go`'s `Membership`/`HasQuorum` implement the dual-majority math
-full joint consensus needs, and have since an earlier session -- unit-tested, but
-deliberately never wired into `node.go`'s live `quorum()`/election/commit-advance path,
-because that path is the single highest-blast-radius piece of code in this project: a
-mistake here doesn't fail loudly, it silently breaks the safety property the entire
-"proven, not asserted" thesis rests on.
+Learners were added before dynamic membership so a replica can catch up without entering
+the voting quorum. The next step is joint consensus: a configuration entry changes the
+quorum used by both elections and commits, which is safety-critical because a mistake can
+silently permit disjoint leaders.
 
 PLAN.md's Phase 11 section names the reason a naive "just add the new node as a voter"
 membership change is unsafe on its own, independent of the joint-consensus dual-majority
@@ -20,25 +18,21 @@ replicas that receive log replication (so they can catch up) but are never count
 
 ## Decision
 
-Wire learners into `node.go`'s live quorum path now; leave the full joint-consensus
-dual-majority transition (`Membership.HasQuorum`) unwired, as before.
+Learners remain non-voting replicas. Promote, demote, and remove already transport-known
+peers through log-replicated joint consensus. A joint entry takes effect when appended;
+`Membership.HasQuorum` requires a majority of both Old and New for elections and commits;
+after that entry commits, the leader appends the final configuration automatically.
 
-This is a real, useful slice of Phase 11 with a fundamentally smaller blast radius than
-the full feature, for a reason worth stating precisely: **learners only ever shrink the
-set of things counted toward quorum**, they never split it into two majorities that must
-both hold simultaneously. `quorum()` becomes `len(voters())/2+1` where `voters()` is
-`peers` minus `learners` -- for every existing caller that never sets `Config.Learners`,
-`voters()` returns exactly `peers` in the same order, so `quorum()` and every safety
-property already proven against it (Figure 8, pre-vote, `TestFigure8UnsafeCommitWouldBeOverwritten`,
-the full torture/chaos suite) are **byte-for-byte unaffected**. The change is additive
-and opt-in, not a modification to the existing voting path's behavior.
+The initial learner change remains additive. Joint consensus extends it without treating a
+union-majority as safe: during the transition both voter sets independently form a
+majority. Membership is reconstructed from the log after every append so a conflicting,
+uncommitted config entry is forgotten. `Snapshot.ConfState` carries the effective
+membership across log compaction and recovery.
 
 What changed, concretely (`internal/raft/node.go`, `election.go`):
 - `Config.Learners` names a subset of `Peers` that are non-voting.
-- `quorum()` and `advanceCommit()`'s majority computation use `voters()` (peers minus
-  learners), not the full peer set -- an entry acknowledged only by learners must never
-  be reported committed, since a subsequent election among the real voters could still
-  overwrite it.
+- `advanceCommit()` and election vote counting use `Membership.HasQuorum`; during joint
+  consensus it requires a majority of both configurations.
 - `startPreVote()`/`startElection()` only message voters -- a learner's vote could never
   legitimately count, so asking is wasted traffic at best.
 - `handlePreVote()`/`handleVote()` reject outright if the receiving node is itself a
@@ -60,19 +54,8 @@ majority of *voters*.
 
 ## Consequences
 
-- **Still not done, stated plainly:** promotion (constructing a new `Config` without a
-  caught-up node in `Learners`, live, without a restart) is not implemented -- today
-  promoting a learner means restarting that replica's `Host` with a new `Config`, not a
-  live reconfiguration command. There is no bootstrap/admin path anywhere in this project
-  (`kv.DurableRange`, `cmd/consensa`) that actually adds a learner to a running group;
-  this closes the `raft.Node` primitive only.
-- **Full joint consensus remains unwired**, exactly as before this session: config
-  entries in the log, dual-majority `HasQuorum` during a joint transition, and
-  disjoint-majority election safety across it are real, unit-tested
-  (`internal/raft/membership.go`) but not connected to `quorum()`/`advanceCommit()`. That
-  wiring is a fundamentally different risk profile than this one -- it changes what
-  counts as a majority *during* a transition, for both old and new voters simultaneously,
-  which is exactly the kind of change that needs its own dedicated scripted safety tests
-  (mid-transition leader crash, mid-transition partition isolating the new config) before
-  it should be trusted, the same way Figure 8 got one rather than being trusted on
-  inspection alone. This ADR deliberately does not attempt it.
+- `raft.Node` and `raft.Host` expose `ProposeConfChange`, but `DurableRange` and the
+  shipped binary do not yet provide an authenticated admin API for it.
+- A change cannot introduce a previously unknown process: each target must already be in
+  the static `Config.Peers` transport universe. Bootstrap, address distribution, and
+  range-routing changes remain separate work.

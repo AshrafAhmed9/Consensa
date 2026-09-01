@@ -31,6 +31,7 @@ type DurableNode struct {
 type DurableNodeConfig struct {
 	ID             raft.NodeID
 	GroupPeers     []raft.NodeID
+	Learners       []raft.NodeID
 	ListenAddress  string
 	TransportPeers map[raft.NodeID]string
 	// Transport optionally attaches this group to a logical view of a shared listener.
@@ -67,7 +68,7 @@ func NewDurableNode(cfg DurableNodeConfig) (*DurableNode, error) {
 	}
 
 	host, err := raft.NewHost(raft.HostConfig{
-		Raft:          raft.Config{ID: cfg.ID, Peers: cfg.GroupPeers, ElectionTick: electionTick, HeartbeatTick: heartbeatTick},
+		Raft:          raft.Config{ID: cfg.ID, Peers: cfg.GroupPeers, Learners: cfg.Learners, ElectionTick: electionTick, HeartbeatTick: heartbeatTick},
 		ListenAddress: cfg.ListenAddress,
 		Peers:         cfg.TransportPeers,
 		Transport:     cfg.Transport,
@@ -107,6 +108,12 @@ func (d *DurableNode) AppliedCount() int {
 // The caller is responsible for calling it on a regular interval; see driveHosts in
 // internal/raft/host_test.go for the pattern this mirrors.
 func (d *DurableNode) Tick() error { return d.host.Tick() }
+
+// ProposeConfChange changes voters among the transport-known peer universe. A new peer
+// must start as a caught-up learner before its promotion is proposed to the current leader.
+func (d *DurableNode) ProposeConfChange(voters, learners []raft.NodeID) error {
+	return d.host.ProposeConfChange(voters, learners)
+}
 
 // Insert proposes an encoded mutation to this replica. It only succeeds if this replica is
 // currently the Raft leader, matching Host.Propose's contract -- callers without a known

@@ -118,6 +118,15 @@ func (h *Host) Status() (Role, uint64) {
 	return h.node.Status()
 }
 
+// ConfState returns the membership metadata that must be included with a snapshot made
+// from this host. It is separate from application snapshot bytes because Raft itself,
+// not the state machine, owns quorum configuration.
+func (h *Host) ConfState() ConfState {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.node.ConfState()
+}
+
 // Tick advances election/heartbeat time and executes the emitted Ready work.
 func (h *Host) Tick() error {
 	h.mu.Lock()
@@ -142,6 +151,22 @@ func (h *Host) Propose(data []byte) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if err := h.node.Propose(data); err != nil {
+		return err
+	}
+	return h.driveLocked()
+}
+
+// ProposeConfChange begins a joint-consensus membership transition on this host's node --
+// see Node.ProposeConfChange's own doc comment for the safety argument and scope. This is
+// the primitive only: no caller in this codebase (kv.DurableRange, cmd/consensa) invokes
+// it yet, the same built-but-unwired-into-a-real-deployment gap this project has closed
+// for other primitives before -- closing it here would additionally need a way for
+// kv.DurableRange callers to learn about and route to a newly-promoted or newly-removed
+// replica, which is real, separate work.
+func (h *Host) ProposeConfChange(newVoters, newLearners []NodeID) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err := h.node.ProposeConfChange(newVoters, newLearners); err != nil {
 		return err
 	}
 	return h.driveLocked()
@@ -214,7 +239,7 @@ func (h *Host) driveLocked() error {
 		_ = h.transport.Send(message)
 	}
 	for _, entry := range ready.CommittedEntries {
-		if string(entry.Data) != string(readBarrierCommand) {
+		if string(entry.Data) != string(readBarrierCommand) && !isConfChangeData(entry.Data) {
 			if err := h.apply(entry); err != nil {
 				return err
 			}

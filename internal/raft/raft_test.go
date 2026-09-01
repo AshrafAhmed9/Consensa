@@ -147,8 +147,8 @@ func TestFigure8UnsafeCommitWouldBeOverwritten(t *testing.T) {
 			matched++
 		}
 	}
-	if matched < n2.quorum() {
-		t.Fatalf("test setup is wrong: expected a real majority to have index 2, only %d/%d do", matched, n2.quorum())
+	if matched < len(n2.membership.Old)/2+1 {
+		t.Fatalf("test setup is wrong: expected a real majority to have index 2, only %d/%d do", matched, len(n2.membership.Old)/2+1)
 	}
 
 	// The real guard: entry 2 is on a majority, but its term (2) isn't n2's own term

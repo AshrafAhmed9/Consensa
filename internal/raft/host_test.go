@@ -23,6 +23,12 @@ type applyLog struct {
 	entries map[NodeID][][]byte
 }
 
+type discardTransport struct{}
+
+func (discardTransport) Addr() net.Addr     { return &net.TCPAddr{} }
+func (discardTransport) Send(Message) error { return nil }
+func (discardTransport) Close() error       { return nil }
+
 func newApplyLog() *applyLog { return &applyLog{entries: map[NodeID][][]byte{}} }
 
 func (a *applyLog) applierFor(id NodeID) func(Entry) error {
@@ -48,6 +54,35 @@ func (a *applyLog) last(id NodeID) []byte {
 		return nil
 	}
 	return entries[len(entries)-1]
+}
+
+func TestHostDoesNotApplyInternalConfChangeEntries(t *testing.T) {
+	db, err := storage.Open(storage.Options{Dir: t.TempDir(), SyncEvery: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	n, err := NewNode(Config{ID: 1, Peers: []NodeID{1}, ElectionTick: 3, HeartbeatTick: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := n.(*node)
+	state.role, state.term = Leader, 1
+	if err := state.ProposeConfChange([]NodeID{1}, nil); err != nil {
+		t.Fatal(err)
+	}
+	state.log.committed = state.log.lastIndex()
+	applied := 0
+	h := &Host{node: state, persister: NewPersister(db), transport: discardTransport{}, progress: make(chan struct{}), apply: func(Entry) error {
+		applied++
+		return nil
+	}}
+	if err := h.driveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	if applied != 0 {
+		t.Fatalf("application state machine received %d internal config entries", applied)
+	}
 }
 
 // freeTCPAddr reserves an OS-assigned loopback port and immediately releases it. There is

@@ -37,6 +37,7 @@ func main() {
 	}
 	id := flag.Uint64("id", 0, "this node's Raft ID (must be a key in --peers)")
 	peersFlag := flag.String("peers", "", `Raft group members and their transport addresses, e.g. "1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003" -- identical on every node in the deployment`)
+	learnersFlag := flag.String("learners", "", "comma-separated non-voting Raft IDs from --peers; use while a replica catches up before promotion")
 	dataDir := flag.String("data-dir", "", "on-disk directory for this node's storage engine and Raft log (required, unique per node)")
 	grpcListen := flag.String("grpc-listen", ":8080", "client-facing gRPC listen address")
 	dimension := flag.Int("dimension", 3, "fixed collection vector dimension")
@@ -58,6 +59,10 @@ func main() {
 	allPeers, err := parsePeers(*peersFlag)
 	if err != nil {
 		fatal("invalid peer configuration", "error", err)
+	}
+	learners, err := parseLearners(*learnersFlag, allPeers)
+	if err != nil {
+		fatal("invalid learner configuration", "error", err)
 	}
 	selfID := raft.NodeID(*id)
 	selfAddr, ok := allPeers[selfID]
@@ -88,7 +93,7 @@ func main() {
 	}()
 
 	node, err := ann.NewDurableNode(ann.DurableNodeConfig{
-		ID: selfID, GroupPeers: groupPeers, ListenAddress: selfAddr, TransportPeers: transportPeers,
+		ID: selfID, GroupPeers: groupPeers, Learners: learners, ListenAddress: selfAddr, TransportPeers: transportPeers,
 		Transport:  transport.Register(0, transportPeers),
 		StorageDir: *dataDir, Index: ann.Config{Dimension: *dimension, M: 16, EFConstruction: 64, EFSearch: 64, Seed: 1},
 	})
@@ -103,7 +108,7 @@ func main() {
 
 	newKVRange := func(rangeID uint64) *kv.DurableRange {
 		rangeNode, err := kv.NewDurableRange(kv.DurableRangeConfig{
-			ID: selfID, GroupPeers: groupPeers, ListenAddress: selfAddr, TransportPeers: transportPeers,
+			ID: selfID, GroupPeers: groupPeers, Learners: learners, ListenAddress: selfAddr, TransportPeers: transportPeers,
 			Transport:  transport.Register(rangeID, transportPeers),
 			StorageDir: filepath.Join(*dataDir, "kv", fmt.Sprintf("range-%d", rangeID)),
 		})
@@ -264,4 +269,33 @@ func parsePeers(raw string) (map[raft.NodeID]string, error) {
 		return nil, fmt.Errorf("must name at least one node")
 	}
 	return peers, nil
+}
+
+// parseLearners keeps startup membership strict: every learner must be a peer that has a
+// transport address in the same deployment configuration. The empty flag means all peers
+// start as voters.
+func parseLearners(raw string, peers map[raft.NodeID]string) ([]raft.NodeID, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	seen := map[raft.NodeID]bool{}
+	var learners []raft.NodeID
+	for _, part := range strings.Split(raw, ",") {
+		id, err := strconv.ParseUint(part, 10, 64)
+		if err != nil || id == 0 {
+			return nil, fmt.Errorf("malformed learner ID %q", part)
+		}
+		nodeID := raft.NodeID(id)
+		if _, ok := peers[nodeID]; !ok {
+			return nil, fmt.Errorf("learner %d is absent from --peers", nodeID)
+		}
+		if !seen[nodeID] {
+			seen[nodeID] = true
+			learners = append(learners, nodeID)
+		}
+	}
+	if len(learners) >= len(peers) {
+		return nil, fmt.Errorf("at least one peer must be a voter")
+	}
+	return learners, nil
 }

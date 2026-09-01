@@ -117,6 +117,7 @@ func RecoverNode(config Config, persister *Persister) (Node, error) {
 		recovered.log.snapshot = snapshot
 		recovered.log.entries = []Entry{{Index: snapshot.Index, Term: snapshot.Term}}
 		recovered.log.applied = snapshot.Index
+		recovered.restoreConfState(snapshot.ConfState, snapshot.Index)
 	}
 	for _, entry := range entries {
 		if entry.Index <= recovered.log.lastIndex() {
@@ -133,6 +134,8 @@ func RecoverNode(config Config, persister *Persister) (Node, error) {
 	recovered.vote = hardState.Vote
 	recovered.log.committed = hardState.Commit
 	recovered.lastHard = hardState
+	// Any surviving suffix may contain a later configuration entry than the snapshot.
+	recovered.recomputeMembership()
 	return recovered, nil
 }
 

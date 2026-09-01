@@ -87,3 +87,67 @@ func TestRecoverNodeReplaysCommittedEntries(t *testing.T) {
 		t.Fatalf("recovered committed entries = %#v", ready.CommittedEntries)
 	}
 }
+
+func TestRecoverNodeRestoresMembershipFromSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	db, err := storage.Open(storage.Options{Dir: dir, SyncEvery: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	persist := NewPersister(db)
+	snapshot := Snapshot{Index: 8, Term: 3, ConfState: ConfState{Old: []NodeID{2, 3, 4}}}
+	if err := persist.Persist(Ready{HardState: HardState{Term: 3, Commit: 8}, Snapshot: snapshot}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = storage.Open(storage.Options{Dir: dir, SyncEvery: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	recovered, err := RecoverNode(Config{ID: 1, Peers: []NodeID{1, 2, 3, 4}, Learners: []NodeID{4}, ElectionTick: 3, HeartbeatTick: 1}, NewPersister(db))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := recovered.(*node)
+	if n.isVoter(1) || !n.isVoter(4) || len(n.membership.Old) != 3 {
+		t.Fatalf("recovered membership = %#v, want stable {2,3,4}", n.membership)
+	}
+}
+
+// TestRecoverNodeRestoresUncommittedJointMembership covers a crash while the first
+// configuration entry is replicated but not committed. Joint consensus takes effect on
+// append, so recovery must preserve that state rather than waiting for the entry to apply.
+func TestRecoverNodeRestoresUncommittedJointMembership(t *testing.T) {
+	dir := t.TempDir()
+	db, err := storage.Open(storage.Options{Dir: dir, SyncEvery: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	persist := NewPersister(db)
+	data, err := marshalConfChange(confChangeEntry{Old: []NodeID{1, 2, 3}, New: []NodeID{1, 2, 3, 4}, Joint: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := persist.Persist(Ready{HardState: HardState{Term: 2}, Entries: []Entry{{Index: 1, Term: 2, Data: data}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = storage.Open(storage.Options{Dir: dir, SyncEvery: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	recovered, err := RecoverNode(Config{ID: 1, Peers: []NodeID{1, 2, 3, 4}, Learners: []NodeID{4}, ElectionTick: 3, HeartbeatTick: 1}, NewPersister(db))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := recovered.(*node)
+	if !n.membership.Joint || !n.isVoter(4) || n.log.committed != 0 {
+		t.Fatalf("recovered state = membership=%#v commit=%d, want uncommitted joint config", n.membership, n.log.committed)
+	}
+}

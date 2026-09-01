@@ -21,17 +21,35 @@ type Node interface {
 	Step(Message) error
 	Tick()
 	Propose([]byte) error
+	// ProposeConfChange begins a membership transition to newVoters/newLearners via the
+	// joint-consensus protocol (see confchange.go's own doc comments for the full
+	// safety argument). Only the leader may call it, and only when no transition is
+	// already in progress; the leave-joint follow-up that finalizes the transition is
+	// automatic once the joint entry itself commits, never a second caller-driven call.
+	ProposeConfChange(newVoters, newLearners []NodeID) error
 	Ready() Ready
 	Advance()
 	// Status reports this replica's own view of its role and term, for administrative
 	// and diagnostic surfaces. It is read-only and never changes protocol behavior.
 	Status() (Role, uint64)
+	// ConfState returns the membership that must accompany any snapshot created from this
+	// replica. A snapshot without it cannot safely replace the configuration entries in
+	// the compacted log prefix.
+	ConfState() ConfState
 }
 type node struct {
-	id                                                             NodeID
-	peers                                                          []NodeID
-	learners                                                       map[NodeID]bool
-	isLearner                                                      bool
+	id    NodeID
+	peers []NodeID
+
+	// initialMembership is the voter/learner configuration NewNode was constructed with,
+	// used as recomputeMembership's base case when no confChangeEntry exists in the log
+	// yet. membership/membershipIndex are recomputed from the log itself after every
+	// append (see recomputeMembership's own doc comment for why this is a full rescan
+	// rather than incremental state).
+	initialMembership Membership
+	membership        Membership
+	membershipIndex   uint64
+
 	role                                                           Role
 	term, vote, leader                                             uint64
 	log                                                            *raftLog
@@ -73,27 +91,22 @@ func NewNode(c Config) (Node, error) {
 	if len(learners) >= len(c.Peers) {
 		return nil, errors.New("raft: at least one peer must be a voter")
 	}
-	return &node{
-		id: c.ID, peers: append([]NodeID(nil), c.Peers...), learners: learners, isLearner: learners[c.ID],
-		log: newLog(), electionTick: c.ElectionTick, heartbeatTick: c.HeartbeatTick,
-		next: map[NodeID]uint64{}, match: map[NodeID]uint64{},
-	}, nil
-}
-
-// voters returns peers excluding learners -- the set every quorum computation (elections,
-// commit advancement) counts over. Learners still appear in n.peers so broadcastAppend
-// still replicates the log to them; they are excluded here, not there.
-func (n *node) voters() []NodeID {
-	out := make([]NodeID, 0, len(n.peers))
-	for _, p := range n.peers {
-		if !n.learners[p] {
-			out = append(out, p)
+	voters := map[NodeID]bool{}
+	for _, p := range c.Peers {
+		if !learners[p] {
+			voters[p] = true
 		}
 	}
-	return out
+	initial := Membership{Old: voters, New: map[NodeID]bool{}}
+	n := &node{
+		id: c.ID, peers: append([]NodeID(nil), c.Peers...), initialMembership: initial,
+		log: newLog(), electionTick: c.ElectionTick, heartbeatTick: c.HeartbeatTick,
+		next: map[NodeID]uint64{}, match: map[NodeID]uint64{},
+	}
+	n.recomputeMembership()
+	return n, nil
 }
 
-func (n *node) quorum() int { return len(n.voters())/2 + 1 }
 func (n *node) Tick() {
 	n.electionElapsed++
 	if n.role == Leader {
@@ -103,12 +116,13 @@ func (n *node) Tick() {
 			n.broadcastAppend()
 		}
 	}
-	// A learner never starts an election, no matter how long it goes without hearing
-	// from a leader: it isn't a voter, so it could never actually win one (no peer would
-	// count its vote request toward quorum -- see startPreVote/startElection below,
-	// which only message n.voters()) and letting it try would just be wasted messages on
-	// every election timeout for as long as it stays a learner.
-	if n.electionElapsed >= n.electionTick && n.role != Leader && !n.isLearner {
+	// A non-voter (a learner, or a node this transition has removed) never starts an
+	// election, no matter how long it goes without hearing from a leader: it could never
+	// actually win one (no real voter would count its vote request toward HasQuorum --
+	// see startPreVote/startElection below, which only message n.votingPeers()), and
+	// letting it try would just be wasted messages on every election timeout for as long
+	// as it stays outside the voting configuration.
+	if n.electionElapsed >= n.electionTick && n.role != Leader && n.isVoter(n.id) {
 		n.electionElapsed = 0
 		n.startPreVote()
 	}
@@ -117,10 +131,25 @@ func (n *node) Propose(data []byte) error {
 	if n.role != Leader {
 		return errors.New("raft: proposal to non-leader")
 	}
-	e := Entry{Index: n.log.lastIndex() + 1, Term: n.term, Data: append([]byte(nil), data...)}
-	if e := n.log.append([]Entry{e}); e != nil {
-		return e
+	return n.proposeInternal(data)
+}
+
+// proposeInternal is Propose's shared implementation, also used by ProposeConfChange and
+// proposeLeaveJoint (confchange.go) to append a raft-internal configuration entry through
+// the identical log-append/broadcast path ordinary application data uses -- a
+// configuration change is replicated and made safe by exactly the same mechanism as any
+// other entry, which is the whole point of representing it as a log entry rather than as
+// some separate out-of-band protocol.
+func (n *node) proposeInternal(data []byte) error {
+	e := Entry{Index: n.log.lastIndex() + 1, Term: n.term, Data: data}
+	if err := n.log.append([]Entry{e}); err != nil {
+		return err
 	}
+	// Effective immediately, before this entry is even sent to anyone else, let alone
+	// committed -- see confChangeEntry's doc comment for why "on append" is the rule.
+	// For an ordinary (non-config) entry this is a no-op: recomputeMembership only
+	// changes anything when the newly appended entry actually decodes as one.
+	n.recomputeMembership()
 	n.unstable = append(n.unstable, e)
 	n.match[n.id] = n.log.lastIndex()
 	n.broadcastAppend()
@@ -173,6 +202,7 @@ func (n *node) Advance() {
 }
 
 func (n *node) Status() (Role, uint64) { return n.role, n.term }
+func (n *node) ConfState() ConfState   { return confStateFromMembership(n.membership) }
 func (n *node) send(m Message)         { m.From = n.id; n.msgs = append(n.msgs, m) }
 func (n *node) becomeFollower(term uint64, leader NodeID) {
 	n.role = Follower
@@ -220,6 +250,12 @@ func (n *node) handleAppend(m Message) {
 	if err := n.log.append(m.Entries); err != nil {
 		return
 	}
+	// Recomputed unconditionally, even when m.Entries is empty (a bare heartbeat): a
+	// PRIOR append could have truncated entries this node had already applied to its
+	// membership (a real leader-change conflict-resolution case, not just a growth
+	// case), so membership must always reflect whatever the log currently holds, not
+	// just what changed in this specific call.
+	n.recomputeMembership()
 	if len(m.Entries) > 0 {
 		n.unstable = append(n.unstable, cloneEntries(m.Entries)...)
 	}
@@ -253,17 +289,66 @@ func (n *node) advanceCommit() {
 	// promoted once caught up) but must never let an entry be counted committed on the
 	// strength of learners alone, which would let a value be visible before it's actually
 	// safe against a leader election among the real voters.
-	voters := n.voters()
-	matches := make([]uint64, 0, len(voters))
-	for _, p := range voters {
-		matches = append(matches, n.match[p])
+	//
+	// During the joint phase this must be a majority of Old AND a majority of New
+	// separately (Membership.HasQuorum), not a majority of their union -- the entire
+	// reason joint consensus exists is that a union-based majority could be satisfied by
+	// two DISJOINT sets of servers, one under the old configuration and one under the
+	// new, each of which could independently elect an incompatible leader. Candidate
+	// commit indices are checked from the highest down, since HasQuorum's dual
+	// requirement isn't monotonic in a single sorted array the way a simple majority's
+	// "n-th highest match" trick assumes.
+	candidates := map[uint64]bool{n.log.lastIndex(): true}
+	for _, m := range n.match {
+		candidates[m] = true
 	}
-	sort.Slice(matches, func(i, j int) bool { return matches[i] < matches[j] })
-	candidate := matches[len(matches)-n.quorum()]
-	term, _ := n.log.term(candidate)
-	if candidate > n.log.committed && term == n.term {
-		n.log.committed = candidate
-		n.broadcastAppend()
+	sorted := make([]uint64, 0, len(candidates))
+	for c := range candidates {
+		sorted = append(sorted, c)
+	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] > sorted[j] })
+	for _, candidate := range sorted {
+		if candidate <= n.log.committed {
+			break
+		}
+		term, _ := n.log.term(candidate)
+		if term != n.term {
+			continue
+		}
+		acked := map[NodeID]bool{}
+		for p, matchIndex := range n.match {
+			if matchIndex >= candidate {
+				acked[p] = true
+			}
+		}
+		if n.membership.HasQuorum(acked) {
+			n.log.committed = candidate
+			n.broadcastAppend()
+			n.maybeLeaveJointOrStepDown()
+			return
+		}
+	}
+}
+
+// maybeLeaveJointOrStepDown runs after every successful commit advance and closes two
+// things joint consensus needs beyond plain quorum safety: (1) once this leader observes
+// the joint (C_old,new) entry itself has committed, it automatically proposes the
+// finalizing entry -- the paper's own two-step protocol, never both entries at once, and
+// never a caller's job to sequence; recomputeMembership flips n.membership.Joint to false
+// the instant this call appends that entry, so a repeated call here is naturally a no-op
+// once it's done. (2) once membership is no longer joint and this node is no longer a
+// voter at all (it was removed), a leader steps down rather than continuing to act as
+// leader for a configuration it isn't even a member of.
+func (n *node) maybeLeaveJointOrStepDown() {
+	if n.role != Leader {
+		return
+	}
+	if n.membership.Joint && n.log.committed >= n.membershipIndex {
+		_ = n.proposeLeaveJoint()
+		return
+	}
+	if !n.membership.Joint && !n.isVoter(n.id) {
+		n.becomeFollower(n.term, 0)
 	}
 }
 func cloneEntries(in []Entry) []Entry {

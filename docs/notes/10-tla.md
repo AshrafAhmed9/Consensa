@@ -46,17 +46,12 @@ this session**: `specs/Makefile`'s `make check` still passes exactly as document
 counterexample, `split.tla` 0 violations) — the specs were not just written once and left
 untested, they still hold.
 
-**A real Go implementation of the spec's dual-majority quorum math already exists
-(`internal/raft/membership.go`'s `Membership`/`HasQuorum`), correct and unit-tested, but
-it has zero callers** -- `node.go`'s live `quorum()`/`advanceCommit()`/vote-counting path
-still uses a single fixed majority, with no awareness of `Membership` at all. This is the
-same built-but-unwired pattern this project has found and closed several times this
-session elsewhere (the torture harness's two workloads, `internal/txn`, `kv.lease`) --
-deliberately NOT closed here, because wiring `Membership` into `node.go`'s live
-`Step`/`advanceCommit`/`handleVoteResp` path is a change to the exact safety-critical
-code this session's `TestFigure8UnsafeCommitWouldBeOverwritten` and
-`TestAsymmetricPartitionDisruptsHealthyLeader` depend on staying correct — genuinely
-Phase 11's full ~2-3 week scope, and not something to rush through in the same pass as
-everything else. The TLA+ spec is exactly what should guide that work when it happens:
-it already states the invariant (`HasQuorum` must require a majority of both `Old` and
-`New` during the joint phase) that the eventual `node.go` change has to preserve.
+The Go implementation now consumes this model's quorum rule directly:
+`internal/raft/membership.go`'s `Membership.HasQuorum` is used by election and commit
+advancement while a configuration is joint. Configuration entries take effect on append,
+are rebuilt after an uncommitted entry is overwritten, and their `ConfState` is carried in
+snapshots so compaction and recovery cannot revert a replica to startup membership.
+Focused tests cover the old-only partition, overwrite, automatic finalization, removal of
+the leader, snapshot restore, and recovery. TLC remains a protocol model rather than a
+proof of implementation conformance; the nemesis scenarios in Phase 11 are still useful
+integration work.

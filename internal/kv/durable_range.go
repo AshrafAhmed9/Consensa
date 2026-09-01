@@ -57,6 +57,7 @@ type DurableRange struct {
 type DurableRangeConfig struct {
 	ID             raft.NodeID
 	GroupPeers     []raft.NodeID
+	Learners       []raft.NodeID
 	ListenAddress  string
 	TransportPeers map[raft.NodeID]string
 	// Transport optionally attaches this range to a logical view of a shared listener.
@@ -87,7 +88,7 @@ func NewDurableRange(cfg DurableRangeConfig) (*DurableRange, error) {
 	}
 
 	host, err := raft.NewHost(raft.HostConfig{
-		Raft:          raft.Config{ID: cfg.ID, Peers: cfg.GroupPeers, ElectionTick: electionTick, HeartbeatTick: heartbeatTick},
+		Raft:          raft.Config{ID: cfg.ID, Peers: cfg.GroupPeers, Learners: cfg.Learners, ElectionTick: electionTick, HeartbeatTick: heartbeatTick},
 		ListenAddress: cfg.ListenAddress,
 		Peers:         cfg.TransportPeers,
 		Transport:     cfg.Transport,
@@ -151,6 +152,13 @@ func (r *DurableRange) apply(entry raft.Entry) error {
 // Tick drives this replica's election/heartbeat clock. The caller is responsible for
 // calling it on a regular interval, matching internal/ann.DurableNode.Tick's contract.
 func (r *DurableRange) Tick() error { return r.host.Tick() }
+
+// ProposeConfChange changes voters among the transport-known peer universe. It is an
+// operator primitive: callers must first start and catch up a learner, then propose its
+// promotion through the current leader.
+func (r *DurableRange) ProposeConfChange(voters, learners []raft.NodeID) error {
+	return r.host.ProposeConfChange(voters, learners)
+}
 
 // Put proposes a key/value write. It only succeeds if this replica is currently the Raft
 // leader, matching Host.Propose's contract -- see internal/ann.DurableNode.Insert's doc

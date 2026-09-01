@@ -10,4 +10,5 @@ func (n *node) handleSnapshot(m Message) {
 	n.log.entries = []Entry{{Index: s.Index, Term: s.Term}}
 	n.log.committed = s.Index
 	n.log.applied = s.Index
+	n.restoreConfState(s.ConfState, s.Index)
 }
