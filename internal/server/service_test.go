@@ -19,6 +19,23 @@ func TestBatchGetReturnsOnlyKnownVectors(t *testing.T) {
 	}
 }
 
+// TestBatchGetUsesIndexPayload proves exact ID reads do not depend on Service.vectors,
+// which is intentionally process-local and empty after a gRPC service restart.
+func TestBatchGetUsesIndexPayload(t *testing.T) {
+	index, err := ann.NewHNSW(ann.Config{Dimension: 2, M: 4, EFConstruction: 8, EFSearch: 8, Seed: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Insert("durable", vector.Vector{3, 4}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(index)
+	got, err := service.BatchGet(context.Background(), &consensav1.BatchGetRequest{Ids: []string{"durable"}})
+	if err != nil || got.Vectors["durable"] == nil || len(got.Vectors["durable"].Values) != 2 {
+		t.Fatalf("BatchGet exact index value = %#v, %v", got, err)
+	}
+}
+
 // TestRequestCountIncrementsAcrossRPCs proves RequestCount (cmd/consensa's source for the
 // consensa_range_qps metric) actually reflects real traffic across every data-plane RPC,
 // not just one -- a counter that only some handlers touched would silently understate QPS.

@@ -22,6 +22,13 @@ type Index interface {
 	Validate(vector.Vector) error
 }
 
+// vectorGetter is optional because simple test indexes and older adapters may not retain
+// exact payloads. DurableNode implements it, letting BatchGet survive a service-process
+// restart instead of treating the process-local vectors map as the source of truth.
+type vectorGetter interface {
+	GetVector(string) (vector.Vector, bool)
+}
+
 // Service is the public API implementation. Its index can be local or Raft-backed.
 type Service struct {
 	consensav1.UnimplementedConsensaServer
@@ -123,13 +130,21 @@ func (s *Service) Delete(_ context.Context, request *consensav1.DeleteRequest) (
 	return &consensav1.DeleteResponse{}, nil
 }
 
-// BatchGet returns vectors that remain visible in the local single-node index.
+// BatchGet returns exact vectors from the replicated index when it supports direct ID
+// lookup, falling back to the local request cache for lightweight in-memory adapters.
 func (s *Service) BatchGet(_ context.Context, r *consensav1.BatchGetRequest) (*consensav1.BatchGetResponse, error) {
 	s.requestCount.Add(1)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := &consensav1.BatchGetResponse{Vectors: map[string]*consensav1.Vector{}}
+	getter, hasGetter := s.index.(vectorGetter)
 	for _, id := range r.Ids {
+		if hasGetter {
+			if v, ok := getter.GetVector(id); ok {
+				out.Vectors[id] = &consensav1.Vector{Values: v}
+				continue
+			}
+		}
 		if v, ok := s.vectors[id]; ok {
 			out.Vectors[id] = &consensav1.Vector{Values: v}
 		}

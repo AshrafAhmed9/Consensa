@@ -11,10 +11,17 @@ A lease names an authorized holder and validity interval. A follower read additi
 requires the local applied index to reach the closed timestamp’s index and the requested
 timestamp not to exceed its promise.
 
+The leader fallback is now a conservative `ReadIndex` barrier: it commits a reserved Raft
+no-op and waits for local application. That commit is a quorum proof with no clock
+assumption, so an isolated former leader times out instead of returning a falsely
+linearizable value. It costs a log entry per protected read for now; heartbeat-context
+ReadIndex is the later optimization, not a different safety contract.
+
 ## What alternatives existed?
 
-ReadIndex quorum confirmation is stronger without clock assumptions, but costs a quorum
-round trip on every read. Leases make the clock assumption explicit.
+ReadIndex quorum confirmation is stronger without clock assumptions, but currently costs
+a quorum round trip and a no-op log entry on every read. Leases make the clock assumption
+explicit.
 
 ## What tradeoff was made?
 
@@ -25,6 +32,9 @@ follower response that has not performed a leader round trip.
 
 Clock skew beyond the configured bound invalidates the lease argument. The production
 assembly must revoke leases conservatively on uncertainty or leader changes.
+
+ADR-009 records the exact `max_offset` assumption and requires `ReadIndex` as the fallback
+whenever a node cannot establish that its lease remains safe.
 
 ## Status
 

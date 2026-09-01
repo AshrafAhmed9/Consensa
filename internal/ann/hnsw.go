@@ -46,6 +46,17 @@ func NewHNSW(c Config) (*HNSW, error) {
 
 // Validate checks whether a vector can be admitted without mutating the graph.
 func (h *HNSW) Validate(v vector.Vector) error { return v.ValidateDimension(h.cfg.Dimension) }
+
+// GetVector returns a copy of one indexed vector. It is intentionally a direct ID lookup,
+// not an ANN query: API recovery paths need the exact durable payload rather than an
+// approximate nearest neighbour.
+func (h *HNSW) GetVector(id string) (vector.Vector, bool) {
+	node, ok := h.nodes[id]
+	if !ok {
+		return nil, false
+	}
+	return append(vector.Vector(nil), node.v...), true
+}
 func (h *HNSW) level() int {
 	u := h.rng.Float64()
 	if u == 0 {

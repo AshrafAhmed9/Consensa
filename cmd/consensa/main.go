@@ -8,9 +8,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +27,11 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+	fatal := func(message string, args ...any) {
+		slog.Error(message, args...)
+		os.Exit(1)
+	}
 	id := flag.Uint64("id", 0, "this node's Raft ID (must be a key in --peers)")
 	peersFlag := flag.String("peers", "", `Raft group members and their transport addresses, e.g. "1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003" -- identical on every node in the deployment`)
 	dataDir := flag.String("data-dir", "", "on-disk directory for this node's storage engine and Raft log (required, unique per node)")
@@ -36,20 +42,20 @@ func main() {
 	flag.Parse()
 
 	if *id == 0 {
-		log.Fatal("consensa: --id is required and must be nonzero")
+		fatal("invalid startup configuration", "reason", "--id is required and must be nonzero")
 	}
 	if *dataDir == "" {
-		log.Fatal("consensa: --data-dir is required")
+		fatal("invalid startup configuration", "reason", "--data-dir is required")
 	}
 
 	allPeers, err := parsePeers(*peersFlag)
 	if err != nil {
-		log.Fatalf("consensa: --peers: %v", err)
+		fatal("invalid peer configuration", "error", err)
 	}
 	selfID := raft.NodeID(*id)
 	selfAddr, ok := allPeers[selfID]
 	if !ok {
-		log.Fatalf("consensa: --id %d is not present in --peers", *id)
+		fatal("node absent from peer configuration", "node_id", selfID)
 	}
 	groupPeers := make([]raft.NodeID, 0, len(allPeers))
 	transportPeers := make(map[raft.NodeID]string, len(allPeers)-1)
@@ -66,11 +72,11 @@ func main() {
 		StorageDir: *dataDir, Index: ann.Config{Dimension: *dimension, M: 16, EFConstruction: 64, EFSearch: 64, Seed: 1},
 	})
 	if err != nil {
-		log.Fatalf("consensa: starting durable node: %v", err)
+		fatal("starting durable node", "error", err)
 	}
 	defer func() {
 		if err := node.Close(); err != nil {
-			log.Printf("consensa: closing node: %v", err)
+			slog.Error("closing durable node", "error", err)
 		}
 	}()
 
@@ -91,13 +97,9 @@ func main() {
 				// is temporarily down -- both are ordinary and handled by internal/raft's
 				// own retry-on-next-heartbeat behavior, not something this loop must react to.
 				_ = node.Tick()
-				// Recall stays at its registered zero value here -- it has no real source
-				// wired to this loop yet (it needs a benchmark hook from harness/bench).
-				// Reporting it anyway would be exactly the kind of fabricated-looking
-				// metric this project's own documentation standard argues against; leaving
-				// it at zero is honest about what isn't measured, not a placeholder to
-				// hide. RangeQPS is set separately below, since it's a rate over a window
-				// rather than an instantaneous value like the Raft term.
+				// Recall is reported separately by an external benchmark through
+				// /report-recall. RangeQPS is set separately below, since it is a rate over
+				// a fixed window rather than an instantaneous value like the Raft term.
 				_, term, _ := node.Status()
 				metricRegistry.RaftTerm.Set(float64(term))
 			}
@@ -134,7 +136,7 @@ func main() {
 			w.WriteHeader(http.StatusNoContent)
 		})
 		if err := http.ListenAndServe(*metricsListen, mux); err != nil {
-			log.Printf("consensa: metrics server stopped: %v", err)
+			slog.Error("metrics server stopped", "error", err)
 		}
 	}()
 
@@ -169,13 +171,14 @@ func main() {
 
 	listener, err := net.Listen("tcp", *grpcListen)
 	if err != nil {
-		log.Fatal(err)
+		fatal("starting gRPC listener", "error", err, "address", *grpcListen)
 	}
 	grpcServer := grpc.NewServer()
 	consensav1.RegisterConsensaServer(grpcServer, service)
-	log.Printf("consensa node %d: raft on %s, gRPC on %s, metrics on http://%s/metrics, data in %s",
-		selfID, selfAddr, *grpcListen, *metricsListen, *dataDir)
-	log.Fatal(grpcServer.Serve(listener))
+	slog.Info("consensa node started", "node_id", selfID, "raft_address", selfAddr, "grpc_address", *grpcListen, "metrics_address", *metricsListen, "data_dir", *dataDir)
+	if err := grpcServer.Serve(listener); err != nil {
+		fatal("gRPC server stopped", "error", err)
+	}
 }
 
 // parsePeers turns "1=host:port,2=host:port" into a NodeID -> address map. It is deliberately

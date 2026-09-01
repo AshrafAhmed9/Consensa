@@ -59,6 +59,7 @@ func NewNode(c Config) (Node, error) {
 	}
 	return &node{id: c.ID, peers: append([]NodeID(nil), c.Peers...), log: newLog(), electionTick: c.ElectionTick, heartbeatTick: c.HeartbeatTick, next: map[NodeID]uint64{}, match: map[NodeID]uint64{}}, nil
 }
+
 func (n *node) quorum() int { return len(n.peers)/2 + 1 }
 func (n *node) Tick() {
 	n.electionElapsed++
@@ -134,7 +135,7 @@ func (n *node) Advance() {
 }
 
 func (n *node) Status() (Role, uint64) { return n.role, n.term }
-func (n *node) send(m Message) { m.From = n.id; n.msgs = append(n.msgs, m) }
+func (n *node) send(m Message)         { m.From = n.id; n.msgs = append(n.msgs, m) }
 func (n *node) becomeFollower(term uint64, leader NodeID) {
 	n.role = Follower
 	n.term = term

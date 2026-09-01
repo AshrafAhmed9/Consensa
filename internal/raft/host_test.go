@@ -105,6 +105,32 @@ func (h *testHost) close(t *testing.T) {
 	}
 }
 
+// TestHostStaggersEqualElectionTimeouts proves production Hosts never inherit the
+// simulator-only failure mode where otherwise identical replicas time out together and
+// split every election forever. The offset is deterministic, so a restarted replica
+// keeps the same timeout instead of introducing timing-dependent recovery behavior.
+func TestHostStaggersEqualElectionTimeouts(t *testing.T) {
+	ids := []NodeID{1, 2, 3}
+	addrs := map[NodeID]string{1: freeTCPAddr(t), 2: freeTCPAddr(t), 3: freeTCPAddr(t)}
+	log := newApplyLog()
+	seen := map[int]bool{}
+	for _, id := range ids {
+		peers := map[NodeID]string{}
+		for _, other := range ids {
+			if other != id {
+				peers[other] = addrs[other]
+			}
+		}
+		h := startTestHost(t, id, ids, addrs[id], peers, log.applierFor(id))
+		defer h.close(t)
+		timeout := h.host.node.(*node).electionTick
+		if seen[timeout] {
+			t.Fatalf("node %d reused election timeout %d", id, timeout)
+		}
+		seen[timeout] = true
+	}
+}
+
 // driveHosts ticks every host in hosts on its own goroutine every tickInterval until stop
 // is closed. Ticking concurrently, rather than round-robin from the test goroutine, is
 // what actually exercises the mutex inside Host and the concurrent inbound TCP handlers.
@@ -199,6 +225,70 @@ func TestHostTCPClusterElectsAndReplicates(t *testing.T) {
 		if got := log.last(id); string(got) != "hello over real tcp" {
 			t.Fatalf("node %d: applied %q, want %q", id, got, "hello over real tcp")
 		}
+	}
+}
+
+// TestHostReadIndexRequiresAndObtainsQuorum proves the conservative read barrier commits
+// only after a live quorum confirms the leader, while keeping its internal no-op out of
+// the hosted application state machine.
+func TestHostReadIndexRequiresAndObtainsQuorum(t *testing.T) {
+	ids := []NodeID{1, 2, 3}
+	addrs := map[NodeID]string{1: freeTCPAddr(t), 2: freeTCPAddr(t), 3: freeTCPAddr(t)}
+	log := newApplyLog()
+	var hosts []*testHost
+	for _, id := range ids {
+		peers := map[NodeID]string{}
+		for _, other := range ids {
+			if other != id {
+				peers[other] = addrs[other]
+			}
+		}
+		hosts = append(hosts, startTestHost(t, id, ids, addrs[id], peers, log.applierFor(id)))
+	}
+	stop := make(chan struct{})
+	wg := driveHosts(hosts, 10*time.Millisecond, stop)
+	defer func() {
+		close(stop)
+		wg.Wait()
+		for _, host := range hosts {
+			host.close(t)
+		}
+	}()
+	if err := proposeToLeader(hosts, []byte("visible data"), 20*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		waitForCount(t, log, id, 1, 15*time.Second)
+	}
+	var leader *testHost
+	for _, host := range hosts {
+		if role, _ := host.host.Status(); role == Leader {
+			leader = host
+			break
+		}
+	}
+	if leader == nil {
+		t.Fatal("leader disappeared before read index")
+	}
+	if _, err := leader.host.ReadIndex(5 * time.Second); err != nil {
+		t.Fatalf("quorum read barrier: %v", err)
+	}
+	// The data command is the only client-visible application entry. The barrier's own
+	// committed log entry must not arrive at an index's or range's Apply callback.
+	for _, id := range ids {
+		if got := log.count(id); got != 1 {
+			t.Fatalf("node %d applied %d user commands after barrier, want 1", id, got)
+		}
+	}
+	for _, host := range hosts {
+		if host != leader {
+			if err := host.host.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := leader.host.ReadIndex(150 * time.Millisecond); err == nil {
+		t.Fatal("isolated leader served a quorum-confirmed read")
 	}
 }
 

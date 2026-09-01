@@ -3,7 +3,10 @@ package raft
 import (
 	"errors"
 	"sync"
+	"time"
 )
+
+var readBarrierCommand = []byte("consensa/raft/read-barrier/v1")
 
 // HostConfig supplies the impure adapters around one pure Raft Node. Apply must be
 // idempotent across restart because a committed entry can be replayed after durable commit
@@ -30,6 +33,7 @@ type Host struct {
 	persister *Persister
 	transport Transport
 	apply     func(Entry) error
+	progress  chan struct{}
 }
 
 // NewHost restores its node before accepting messages, then either starts a dedicated TCP
@@ -40,11 +44,19 @@ func NewHost(config HostConfig) (*Host, error) {
 	if config.Persister == nil || config.Apply == nil {
 		return nil, errors.New("raft: host persister and apply callback required")
 	}
-	node, err := RecoverNode(config.Raft, config.Persister)
+	// The pure Node accepts its exact configured timeout so simulator tests can control
+	// every logical tick. Real Hosts need the other half of Raft's election-timer rule:
+	// replicas must not all campaign on the same wall-clock tick. A random timeout would
+	// make a restart's behavior harder to reproduce, so derive a small, stable offset
+	// from the persisted replica identity instead. All replicas still use the same
+	// configured base, while the first campaign is separated by at least one tick.
+	raftConfig := config.Raft
+	raftConfig.ElectionTick += hostElectionStagger(raftConfig.ID, raftConfig.ElectionTick)
+	node, err := RecoverNode(raftConfig, config.Persister)
 	if err != nil {
 		return nil, err
 	}
-	host := &Host{node: node, persister: config.Persister, apply: config.Apply}
+	host := &Host{node: node, persister: config.Persister, apply: config.Apply, progress: make(chan struct{})}
 	if config.Transport != nil {
 		host.transport = config.Transport
 		return host, nil
@@ -55,6 +67,18 @@ func NewHost(config HostConfig) (*Host, error) {
 	}
 	host.transport = transport
 	return host, nil
+}
+
+// hostElectionStagger returns a deterministic offset strictly smaller than half the
+// configured timeout. It is deliberately an adapter concern: NewNode remains a pure,
+// exactly-ticked state machine for the simulator, whereas a real Host needs the
+// wall-clock election de-synchronization Raft relies on in production.
+func hostElectionStagger(id NodeID, base int) int {
+	span := base / 2
+	if span < 1 {
+		span = 1
+	}
+	return 1 + int((uint64(id)-1)%uint64(span))
 }
 
 // Addr returns the peer address assigned to this host.
@@ -98,6 +122,50 @@ func (h *Host) Propose(data []byte) error {
 	return h.driveLocked()
 }
 
+// ReadIndex confirms this leader still has a quorum before a linearizable read. It
+// replicates a reserved no-op and waits until that entry is locally applied; committing it
+// requires a current quorum, so an isolated former leader times out instead of serving a
+// response that could violate real-time order. This is deliberately a conservative
+// read-barrier implementation: the later heartbeat-context optimization can remove the
+// log entry without weakening the safety argument.
+func (h *Host) ReadIndex(timeout time.Duration) (uint64, error) {
+	h.mu.Lock()
+	if role, _ := h.node.Status(); role != Leader {
+		h.mu.Unlock()
+		return 0, errors.New("raft: read index requires leader")
+	}
+	if err := h.node.Propose(readBarrierCommand); err != nil {
+		h.mu.Unlock()
+		return 0, err
+	}
+	target := h.node.(*node).log.lastIndex()
+	if err := h.driveLocked(); err != nil {
+		h.mu.Unlock()
+		return 0, err
+	}
+	progress := h.progress
+	h.mu.Unlock()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case <-progress:
+			h.mu.Lock()
+			applied := h.node.(*node).log.applied
+			role, _ := h.node.Status()
+			next := h.progress
+			h.mu.Unlock()
+			if applied >= target && role == Leader {
+				return target, nil
+			}
+			progress = next
+		case <-timer.C:
+			return 0, errors.New("raft: read index quorum confirmation timed out")
+		}
+	}
+}
+
 // Close stops the peer listener. It does not close the caller-owned storage engine.
 func (h *Host) Close() error { return h.transport.Close() }
 
@@ -121,10 +189,14 @@ func (h *Host) driveLocked() error {
 		_ = h.transport.Send(message)
 	}
 	for _, entry := range ready.CommittedEntries {
-		if err := h.apply(entry); err != nil {
-			return err
+		if string(entry.Data) != string(readBarrierCommand) {
+			if err := h.apply(entry); err != nil {
+				return err
+			}
 		}
 	}
 	h.node.Advance()
+	close(h.progress)
+	h.progress = make(chan struct{})
 	return nil
 }

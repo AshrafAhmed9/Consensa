@@ -140,8 +140,10 @@ What remains unproven, stated plainly: multi-range sharding, transactions, and t
 torture harness have not been exercised against the durable path under sustained chaos.
 Writes are not forwarded to the leader server-side — a client that reaches a non-leader
 replica gets a real `"not leader"` error and must retry elsewhere itself (see
-`docs/notes/05-api.md` for the full accounting, including a real gap in `BatchGet`
-reading from process-local bookkeeping rather than the replicated index). Do not read the
-tests and manual verification above as proof of the full distributed-systems claim in the
-README; they are proof that the actual shipped artifact — not just its component
-packages in isolation — does what the README claims for the pieces it covers.
+`docs/notes/05-api.md` for the full accounting). `BatchGet` reads exact payloads from a
+durable index when the backend supplies them, so it survives service-process recreation;
+the old process-local map is only a compatibility fallback for minimal in-memory
+adapters. Do not read the tests and manual verification above as proof of the full
+distributed-systems claim in the README; they are proof that the actual shipped artifact
+— not just its component packages in isolation — does what the README claims for the
+pieces it covers.

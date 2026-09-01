@@ -12,8 +12,17 @@ jobs:
         with: {go-version: stable}
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: "17"}
       - run: python -m pip install numpy pytest
-      - run: go test -race ./...
+      - name: Model-check TLA+ specifications
+        run: |
+          curl -fsSL -o /tmp/tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+          make -C specs check TLA_JAR=/tmp/tla2tools.jar
+      # Real TCP Raft tests open listeners and fsync WALs. Keep packages serial just as
+      # CI does, so the nightly fault matrix measures protocol behavior rather than a
+      # shared runner's scheduler contention.
+      - run: go test -race -p 1 ./...
       - run: python -m pytest harness
       - run: python -m harness.torture.cli run --workload register --nemesis partition,crash --seeds 1000
       - run: python -m harness.torture.cli run --workload vector --nemesis partition,crash --seeds 1000

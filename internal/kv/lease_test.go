@@ -18,3 +18,17 @@ func TestFollowerReadRequiresClosedAppliedState(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+// TestFollowerReadRejectsLeaseInsideClockUncertainty proves the explicit max-offset
+// margin prevents a locally valid-looking lease from being used at its unsafe tail.
+func TestFollowerReadRejectsLeaseInsideClockUncertainty(t *testing.T) {
+	now := time.Unix(10, 0)
+	lease := Lease{Holder: raft.NodeID(2), Start: now.Add(-time.Second), Expiration: now.Add(50 * time.Millisecond)}
+	closed := ClosedTimestamp{Timestamp: now, AppliedIndex: 5}
+	if err := FollowerReadAllowed(lease, 2, closed, now, now, 5); err != nil {
+		t.Fatalf("ordinary lease check unexpectedly failed: %v", err)
+	}
+	if err := FollowerReadAllowedWithOffset(lease, 2, closed, now, now, 5, 100*time.Millisecond); err == nil {
+		t.Fatal("lease inside clock uncertainty window was accepted")
+	}
+}

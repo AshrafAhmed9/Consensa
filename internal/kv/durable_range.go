@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"math"
+	"time"
 
 	"github.com/ashraf/consensa/internal/raft"
 	"github.com/ashraf/consensa/internal/storage"
@@ -14,6 +15,8 @@ import (
 // A user key starting with this prefix would silently corrupt Raft's own durable state,
 // so it is rejected here rather than merely documented as a caller's responsibility.
 var reservedKeyPrefix = []byte("raft/")
+
+const readIndexTimeout = 3 * time.Second
 
 // DurableRange is one range replica backed by a real Raft host over real TCP and a real
 // on-disk MVCC storage engine -- the durable counterpart to MultiRaft's in-memory
@@ -148,17 +151,14 @@ func (r *DurableRange) Get(key []byte) ([]byte, error) {
 	return r.db.Get(key, storage.HLC{WallTime: math.MaxInt64})
 }
 
-// ConsistentGet reads key only if this replica is currently the Raft leader, returning the
-// same "not leader" error Put/Delete do otherwise (see Put's doc comment for the
-// client-retry pattern this requires). This is what makes a read linearizable rather than
-// merely bounded-stale: a leader has, by definition, applied everything it has itself
-// committed, so if a prior write was acknowledged by this leader, this read (issued after
-// that acknowledgment, against the same still-current leader) is guaranteed to observe
-// it -- real-time order is preserved. It gives up Get's one advantage (any replica can
-// serve it, spreading read load) for that guarantee.
+// ConsistentGet first confirms this replica still has a Raft quorum, then reads key. A
+// local leader role alone is insufficient: a former leader isolated by a partition can
+// retain that role after a newer majority has committed writes elsewhere. Host.ReadIndex
+// supplies the quorum proof without a clock assumption; it times out rather than serving
+// a potentially stale answer when the leader cannot reach a majority.
 func (r *DurableRange) ConsistentGet(key []byte) ([]byte, error) {
-	if role, _ := r.host.Status(); role != raft.Leader {
-		return nil, errors.New("kv: consistent read requires this replica to be leader")
+	if _, err := r.host.ReadIndex(readIndexTimeout); err != nil {
+		return nil, err
 	}
 	return r.Get(key)
 }

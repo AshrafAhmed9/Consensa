@@ -43,12 +43,11 @@ Reads (`Search`/`Validate`/`BatchGet`) do not have this restriction: any replica
 them locally once a mutation is applied, since Raft-ordered mutation makes every replica's
 graph equal by construction (see `internal/ann/doc.go`).
 
-`BatchGet` still reads from `Service.vectors`, a plain in-memory map local to whichever
-process answers the RPC -- it is populated only by writes that landed on *that* process
-(i.e., only ever the leader, historically), not reconstructed from the replicated index.
-A `BatchGet` sent to a follower that has never been leader will not see IDs another
-replica accepted. This is a real, currently-undocumented-elsewhere gap; fixing it means
-sourcing `BatchGet` from the index itself rather than the service's local bookkeeping map.
+`BatchGet` now prefers an optional exact-ID lookup on its index. `ann.DurableNode`
+implements that lookup under the graph's read lock, so a service recreated after durable
+Raft recovery returns vectors from the recovered graph instead of an empty process-local
+map. The local map remains a compatibility fallback for minimal in-memory adapters that
+do not retain exact payloads.
 
 The actual multi-process, real-TCP, real-storage deployment path is now proven twice: once
 via `cmd/consensa/main_e2e_test.go` (three real OS processes, kill and restart one, verify

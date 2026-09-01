@@ -3,7 +3,7 @@
   "uid": "consensa-overview",
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "5s",
   "time": { "from": "now-15m", "to": "now" },
   "panels": [
@@ -39,13 +39,18 @@
     },
     {
       "id": 3,
-      "title": "Not yet measured",
-      "type": "text",
-      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 8 },
-      "options": {
-        "mode": "markdown",
-        "content": "**consensa_ann_recall is not wired yet.** It is registered but always reports zero -- there is deliberately no panel for it above, since a graph that can only ever show a flat zero line would misrepresent it as a measured quantity. See `docs/notes/13-observability.md` for what closing this needs."
-      }
+      "title": "Measured ANN recall",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "consensa_ann_recall",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "description": "Recall is reported by an external benchmark after comparison with independent brute-force ground truth. A zero means either no report has been submitted or measured recall was zero; it is not a node-generated estimate."
     }
   ]
 }

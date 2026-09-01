@@ -141,6 +141,15 @@ func (d *DurableNode) Validate(v vector.Vector) error {
 	return d.index.Validate(v)
 }
 
+// GetVector returns an exact vector already applied to this replica's graph. It is safe
+// for recovery-time BatchGet because NewDurableNode rebuilds the graph from durable Raft
+// state before returning to its caller.
+func (d *DurableNode) GetVector(id string) (vector.Vector, bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.index.GetVector(id)
+}
+
 // Addr returns this replica's bound transport address, useful when ListenAddress was
 // "127.0.0.1:0" and the OS assigned the actual port.
 func (d *DurableNode) Addr() string { return d.host.Addr() }

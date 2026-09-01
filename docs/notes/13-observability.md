@@ -97,8 +97,13 @@ election; the dashboard's three panels loaded exactly as provisioned; and — th
 actually proves the pipeline, not just the plumbing — issuing 20 real gRPC `Search`
 requests against one node made `consensa_range_qps` report a real, nonzero rate
 (`9`) on exactly that node for several seconds while the other two, which received no
-traffic, correctly stayed at `0`. The dashboard's third panel is a text panel stating
-plainly that recall is not measured yet, rather than shipping a graph that could only ever
-show a flat zero line.
+traffic, correctly stayed at `0`. The dashboard's third panel now graphs
+`consensa_ann_recall` and explains that its value comes from an external benchmark's
+independent brute-force comparison. A zero therefore means either no benchmark has
+reported yet or the measured recall really was zero; it is not a node-generated estimate.
 
-Structured JSON logging and the `docker compose up` demo GIF remain entirely unbuilt.
+The shipped `consensa` binary now emits structured JSON logs to stderr for startup,
+configuration failures, listener failures, metrics-server failures, and shutdown errors.
+Fields use bounded operational identifiers such as node ID and listen address; request
+payloads, vector IDs, and transaction IDs are intentionally never logged. The
+`docker compose up` demo GIF remains unbuilt.
