@@ -449,6 +449,138 @@ func TestGrantLeaseReplicatesToEveryReplica(t *testing.T) {
 	}
 }
 
+// TestFollowerReadServesOnceLeasedAndClosed proves the read-path ladder's third rung
+// (docs/notes/09-leases.md) actually works end to end against a real 3-node group: a
+// follower cannot serve FollowerRead until it holds a valid, replicated lease AND has
+// applied a closed-timestamp promise covering the read -- and once both hold, it serves
+// the value correctly from its own local storage, with no request to the leader at all.
+func TestFollowerReadServesOnceLeasedAndClosed(t *testing.T) {
+	ids := []raft.NodeID{1, 2, 3}
+	group := startDurableRangeGroup(t, 1, nil, nil, ids)
+	defer group.closeAll(t)
+
+	stop := make(chan struct{})
+	wg := driveRanges(group.list(), 10*time.Millisecond, stop)
+	defer func() { close(stop); wg.Wait() }()
+
+	var leader *DurableRange
+	deadline := time.Now().Add(20 * time.Second)
+	for leader == nil {
+		for _, r := range group.list() {
+			if role, _ := r.Status(); role == raft.Leader {
+				leader = r
+				break
+			}
+		}
+		if leader == nil {
+			if time.Now().After(deadline) {
+				t.Fatal("no leader elected")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	var follower *DurableRange
+	for _, r := range group.list() {
+		if r != leader {
+			follower = r
+			break
+		}
+	}
+	if follower == nil {
+		t.Fatal("no follower found")
+	}
+
+	if err := putUntilAccepted([]*DurableRange{leader}, []byte("k"), []byte("v1"), 20*time.Second); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	// Wait for every replica -- not just the leader -- to have actually applied the write,
+	// so the closed-timestamp command proposed below is guaranteed to commit at a later
+	// log index than it on every replica, including the follower under test.
+	deadline = time.Now().Add(20 * time.Second)
+	for {
+		allConverged := true
+		for _, r := range group.list() {
+			if v, err := r.Get([]byte("k")); err != nil || string(v) != "v1" {
+				allConverged = false
+			}
+		}
+		if allConverged {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("put never converged to every replica")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	readAt := time.Now()
+
+	// Before any lease or closed timestamp exists, FollowerRead must reject -- on the
+	// follower under test AND on the leader itself, since the leader is not the lease
+	// holder here either.
+	if _, err := follower.FollowerRead([]byte("k"), readAt, 0); err == nil {
+		t.Fatal("FollowerRead succeeded before any lease was granted")
+	}
+
+	var leaseErr error
+	deadline = time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if leaseErr = leader.GrantLease(follower.id, 30*time.Second); leaseErr == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if leaseErr != nil {
+		t.Fatalf("leader never accepted GrantLease: %v", leaseErr)
+	}
+
+	deadline = time.Now().Add(20 * time.Second)
+	for follower.CurrentLease().Holder != follower.id {
+		if time.Now().After(deadline) {
+			t.Fatal("lease grant never replicated to the follower")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Lease alone is still not enough: no closed timestamp has been applied yet.
+	if _, err := follower.FollowerRead([]byte("k"), readAt, 0); err == nil {
+		t.Fatal("FollowerRead succeeded with a lease but no closed timestamp")
+	}
+
+	var closeErr error
+	deadline = time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if closeErr = leader.AdvanceClosedTimestamp(readAt); closeErr == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if closeErr != nil {
+		t.Fatalf("leader never accepted AdvanceClosedTimestamp: %v", closeErr)
+	}
+
+	deadline = time.Now().Add(20 * time.Second)
+	for follower.CurrentClosedTimestamp().AppliedIndex == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("closed timestamp never replicated to and applied on the follower")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	got, err := follower.FollowerRead([]byte("k"), readAt, 0)
+	if err != nil || string(got) != "v1" {
+		t.Fatalf("FollowerRead(k) = %q, %v, want \"v1\", nil once leased and closed", got, err)
+	}
+
+	// Control: a replica that does NOT hold the lease (the leader itself) must still be
+	// rejected even though the same closed timestamp has applied everywhere -- the lease
+	// check is per-holder, not per-replica-caught-up.
+	if _, err := leader.FollowerRead([]byte("k"), readAt, 0); err == nil {
+		t.Fatal("FollowerRead succeeded on a replica that does not hold the lease")
+	}
+}
+
 // TestConsistentGetRequiresLeadership proves ConsistentGet actually enforces the
 // leader-only contract its doc comment claims -- the property that makes it linearizable
 // where Get is only bounded-stale. A follower must reject it exactly like Put/Delete

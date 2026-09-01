@@ -160,9 +160,10 @@ func (m *MultiRaft) applyCommitted() error {
 type commandType string
 
 const (
-	commandPut    commandType = "put"
-	commandDelete commandType = "delete"
-	commandLease  commandType = "lease"
+	commandPut             commandType = "put"
+	commandDelete          commandType = "delete"
+	commandLease           commandType = "lease"
+	commandClosedTimestamp commandType = "closed_timestamp"
 )
 
 // rangeCommand's lease fields carry a Lease grant (see lease.go) through the same
@@ -172,6 +173,12 @@ const (
 // values assigned once by the proposing leader), not re-derived per replica, so every
 // replica applies the identical lease interval regardless of when it individually applies
 // the entry.
+//
+// ClosedTimestamp carries a commandClosedTimestamp command's promised bound the same way:
+// fixed once by the proposing leader, replicated, and applied identically everywhere --
+// except each replica pairs it with ITS OWN entry.Index at apply time (durable_range.go),
+// since "how far this specific replica has applied" is inherently per-replica, unlike the
+// timestamp bound itself.
 type rangeCommand struct {
 	Type            commandType `json:"type"`
 	Key             []byte      `json:"key,omitempty"`
@@ -179,6 +186,7 @@ type rangeCommand struct {
 	LeaseHolder     raft.NodeID `json:"lease_holder,omitempty"`
 	LeaseStart      time.Time   `json:"lease_start,omitempty"`
 	LeaseExpiration time.Time   `json:"lease_expiration,omitempty"`
+	ClosedTimestamp time.Time   `json:"closed_timestamp,omitempty"`
 }
 
 var rangeCommandPrefix = []byte("consensa/kv/v1:")
@@ -208,10 +216,10 @@ func (s *rangeState) apply(data []byte) error {
 		s.values[string(command.Key)] = bytes.Clone(command.Value)
 	case commandDelete:
 		delete(s.values, string(command.Key))
-	case commandLease:
-		// This in-memory harness models Put/Delete convergence only; lease-holder
-		// state is tracked by DurableRange (see durable_range.go), the real
-		// replicated implementation these tests don't exercise.
+	case commandLease, commandClosedTimestamp:
+		// This in-memory harness models Put/Delete convergence only; lease and
+		// closed-timestamp state are tracked by DurableRange (see durable_range.go),
+		// the real replicated implementation these tests don't exercise.
 	default:
 		return errors.New("kv: unknown range command")
 	}
@@ -233,9 +241,10 @@ func decodeRangeCommand(data []byte) (rangeCommand, bool, error) {
 	if err := json.Unmarshal(data[len(rangeCommandPrefix):], &command); err != nil {
 		return rangeCommand{}, false, err
 	}
-	// A lease grant carries no Key -- it authorizes a holder over the whole range, not one
-	// entry -- so the empty-key rejection below only applies to Put/Delete.
-	if command.Type != commandLease && len(command.Key) == 0 {
+	// A lease grant or closed-timestamp advance carries no Key -- each authorizes/promises
+	// something over the whole range, not one entry -- so the empty-key rejection below
+	// only applies to Put/Delete.
+	if command.Type != commandLease && command.Type != commandClosedTimestamp && len(command.Key) == 0 {
 		return rangeCommand{}, false, errors.New("kv: command has empty key")
 	}
 	return command, true, nil

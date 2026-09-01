@@ -34,6 +34,7 @@ const readIndexTimeout = 3 * time.Second
 // own WAL/SSTable recovery (proven in internal/storage/engine_test.go); DurableRange adds
 // no additional recovery logic of its own, which is the point of building it this way.
 type DurableRange struct {
+	id   raft.NodeID
 	host *raft.Host
 	db   *storage.DB
 
@@ -43,6 +44,13 @@ type DurableRange struct {
 	// shape as Go's sync.RWMutex is built for.
 	leaseMu      sync.RWMutex
 	currentLease Lease
+
+	// closedMu guards closedTimestamp and appliedIndex the same way leaseMu guards
+	// currentLease, and for the same reason: apply's writer goroutine versus an arbitrary
+	// reader goroutine deciding whether a follower read is currently safe.
+	closedMu         sync.RWMutex
+	closedTimestamp  ClosedTimestamp
+	lastAppliedIndex uint64
 }
 
 // DurableRangeConfig names one replica's identity, group membership, and durable storage.
@@ -68,7 +76,7 @@ func NewDurableRange(cfg DurableRangeConfig) (*DurableRange, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &DurableRange{db: db}
+	r := &DurableRange{id: cfg.ID, db: db}
 
 	electionTick, heartbeatTick := cfg.ElectionTick, cfg.HeartbeatTick
 	if electionTick == 0 {
@@ -105,6 +113,16 @@ func NewDurableRange(cfg DurableRangeConfig) (*DurableRange, error) {
 // rangeCommandPrefix in multiraft.go), leaving room for other command families sharing
 // the same Raft group in a later phase.
 func (r *DurableRange) apply(entry raft.Entry) error {
+	// Tracked unconditionally, before the decode/namespace check below: "how far has
+	// this replica applied" must reflect every committed entry it has processed, not
+	// only ones this range recognized -- a foreign command family sharing this Raft
+	// group (see rangeCommandPrefix's own doc comment) still advances real progress.
+	r.closedMu.Lock()
+	if entry.Index > r.lastAppliedIndex {
+		r.lastAppliedIndex = entry.Index
+	}
+	r.closedMu.Unlock()
+
 	command, ok, err := decodeRangeCommand(entry.Data)
 	if err != nil || !ok {
 		return err
@@ -119,6 +137,11 @@ func (r *DurableRange) apply(entry raft.Entry) error {
 		r.leaseMu.Lock()
 		r.currentLease = Lease{Holder: command.LeaseHolder, Start: command.LeaseStart, Expiration: command.LeaseExpiration}
 		r.leaseMu.Unlock()
+		return nil
+	case commandClosedTimestamp:
+		r.closedMu.Lock()
+		r.closedTimestamp = ClosedTimestamp{Timestamp: command.ClosedTimestamp, AppliedIndex: entry.Index}
+		r.closedMu.Unlock()
 		return nil
 	default:
 		return errors.New("kv: unknown range command")
@@ -207,11 +230,8 @@ func (r *DurableRange) AllKeys() (map[string][]byte, error) {
 // replica on apply, so every replica ends up with the identical interval regardless of
 // how staggered their individual apply calls are.
 //
-// What this does NOT implement, stated plainly (see ADR-009 and docs/notes/09-leases.md):
-// there is no closed-timestamp advancement and no follower-read serving path wired to
-// this lease yet -- CurrentLease plus lease.go's FollowerReadAllowedWithOffset give a
-// caller everything needed to check whether a follower read would be safe, but nothing
-// here yet serves one. Granting and replicating the lease itself is the piece this closes.
+// See AdvanceClosedTimestamp and FollowerRead below for what a granted lease actually
+// authorizes; GrantLease itself only closes lease replication.
 func (r *DurableRange) GrantLease(holder raft.NodeID, duration time.Duration) error {
 	if duration <= 0 {
 		return errors.New("kv: lease duration must be positive")
@@ -234,6 +254,64 @@ func (r *DurableRange) CurrentLease() Lease {
 	r.leaseMu.RLock()
 	defer r.leaseMu.RUnlock()
 	return r.currentLease
+}
+
+// AdvanceClosedTimestamp proposes a promise that no future write at or below ts will land
+// below this proposal's own eventual commit index -- the piece GrantLease's own doc
+// comment named as still missing. Like Put and GrantLease, this only succeeds from the
+// current leader: only the leader knows it has stopped (and will continue to stop)
+// accepting writes at or below ts before proposing this. Callers are expected to call
+// this periodically (mirroring a real production closed-timestamp tracker) with ts set
+// slightly behind "now" -- how far behind is a latency/staleness tradeoff this type
+// deliberately leaves to the caller rather than picking one policy here.
+func (r *DurableRange) AdvanceClosedTimestamp(ts time.Time) error {
+	data, err := marshalRangeCommand(rangeCommand{Type: commandClosedTimestamp, ClosedTimestamp: ts})
+	if err != nil {
+		return err
+	}
+	return r.host.Propose(data)
+}
+
+// CurrentClosedTimestamp returns the most recent closed-timestamp promise this replica has
+// itself applied, paired with the local applied index at which it applied it (see apply's
+// own doc comment for why AppliedIndex is per-replica even though Timestamp is not). The
+// zero value (AppliedIndex 0) means nothing has been advanced and applied here yet, which
+// FollowerReadAllowed/FollowerReadAllowedWithOffset both correctly treat as "not caught up
+// to any promise."
+func (r *DurableRange) CurrentClosedTimestamp() ClosedTimestamp {
+	r.closedMu.RLock()
+	defer r.closedMu.RUnlock()
+	return r.closedTimestamp
+}
+
+// AppliedIndex returns this replica's own most recently applied Raft log index -- the
+// piece docs/notes/09-leases.md named as missing before closed-timestamp advancement could
+// be checked at all ("Host.AppliedIndex() does not exist yet"). Tracked directly by this
+// type rather than added to raft.Host: DurableRange already observes every entry through
+// its own Apply callback, so no change to Host's own surface was needed to get it.
+func (r *DurableRange) AppliedIndex() uint64 {
+	r.closedMu.RLock()
+	defer r.closedMu.RUnlock()
+	return r.lastAppliedIndex
+}
+
+// FollowerRead serves key from this replica's own local storage if -- and only if --
+// FollowerReadAllowedWithOffset (lease.go) says doing so is safe: this replica must
+// currently hold a lease valid at now (within maxOffset's conservative clock-skew bound),
+// must have applied at least as far as the closed timestamp's promised index, and readAt
+// must not exceed the closed timestamp's promise. This is what actually closes the read
+// path ladder's third rung (docs/notes/09-leases.md): ReadIndex proves quorum with no
+// clock assumption on the leader; a lease-and-closed-timestamp read like this one instead
+// lets ANY replica holding the lease -- follower included -- answer without contacting
+// anyone, at the cost of the bounded clock-offset assumption ADR-009 states explicitly.
+func (r *DurableRange) FollowerRead(key []byte, readAt time.Time, maxOffset time.Duration) ([]byte, error) {
+	lease := r.CurrentLease()
+	closed := r.CurrentClosedTimestamp()
+	applied := r.AppliedIndex()
+	if err := FollowerReadAllowedWithOffset(lease, r.id, closed, readAt, time.Now(), applied, maxOffset); err != nil {
+		return nil, err
+	}
+	return r.Get(key)
 }
 
 // validateRangeKey rejects an empty key or one that collides with Persister's reserved
