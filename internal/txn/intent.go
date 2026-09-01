@@ -5,6 +5,8 @@ import "errors"
 // Status is the sole authority for resolving a provisional write.
 type Status uint8
 
+// Pending, Committed, and Aborted are Status's three possible values: a transaction
+// record starts Pending and moves to exactly one of the other two, never back.
 const (
 	Pending Status = iota
 	Committed

@@ -10,6 +10,30 @@ end-to-end distributed cluster under the seeded fault-injection matrix the plan 
 for; that claim will be added only after the Python torture harness drives real
 replicated API workloads across the full fault matrix (`PLAN.md` Phase 6), not before.
 
+**A real finding: the CI pipeline itself had never once run successfully.**
+`.github/workflows/ci.yml` pinned `golangci-lint-action` to `v2.8.0`, built with Go 1.25;
+`go.mod` has said `go 1.26.0` since the very first Go commit of this project
+(`de24b118`), and golangci-lint refuses to lint a module targeting a newer Go version
+than it was itself built with. Every push since the pivot to Go -- every commit this
+session and every one before it -- was red on GitHub Actions before the lint step ever
+ran a single check, discovered only by actually running `gh run list` and reading the
+failure, not by re-reading source. This means every "tests pass" claim in this document
+and elsewhere was true of what was run *locally*, but had never once been independently
+confirmed by the CI pipeline a real reviewer would actually look at. Fixed by pinning
+`golangci-lint-action` to `v2.13.2` (verified to exist as a real published release, and
+built with a Go version new enough to lint `go 1.26.0`) and fixing the three real
+`revive` `exported`-rule violations it had been silently never catching (missing doc
+comments on `raft.Role`'s and `raft.MessageType`'s constant blocks, and
+`txn.Status`'s). Checked against the actual per-step run logs (`gh run view --json jobs`), not assumed:
+`go vet ./...` genuinely ran and passed on every push, but `go test -race ./...` and
+`python -m pytest harness/torture` were never reached at all -- GitHub Actions stops a
+job's remaining steps after one fails, so both were reported `skipped` on every single
+run since the Go pivot. The claims in this document about `-race` and the torture
+harness passing are backed by this session's own local runs (and, per each commit's own
+message, verified before every push), not by CI ever having confirmed them
+independently -- that gap is now closed going forward, not backfilled for the commits
+already on `main`.
+
 **The register workload is now real, and its current limit is precisely known.** Before
 this session, `register.run()` checked a fixed, hand-written history — the seed and
 `--nemesis` flags existed but had no effect on the outcome. `cmd/torture` now drives a

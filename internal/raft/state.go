@@ -6,6 +6,8 @@ type NodeID uint64
 // Role is the replica's election state.
 type Role uint8
 
+// Follower, Candidate, and Leader are Role's three possible values, in the order a
+// replica normally passes through them on its way to (or back down from) leadership.
 const (
 	Follower Role = iota
 	Candidate
@@ -31,6 +33,8 @@ type Snapshot struct {
 // MessageType enumerates Raft RPCs plus local proposal messages.
 type MessageType uint8
 
+// MsgPreVote through MsgSnapshot are MessageType's values: the pre-vote and real-vote
+// request/response pairs, log replication and its response, and snapshot installation.
 const (
 	MsgPreVote MessageType = iota
 	MsgPreVoteResp
