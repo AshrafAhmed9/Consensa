@@ -27,8 +27,26 @@ for later optimisation.
 ## What can fail?
 
 ANN search is approximate and therefore measured by recall rather than a linearizability
-claim. Invalid dimensions are rejected. Recall must be evaluated on a pinned corpus before
-any performance or accuracy claim is made.
+claim. Invalid dimensions are rejected.
+
+**The pinned-corpus recall harness now exists and is connected to the real Go index**,
+closing a gap this file used to just flag as future work. `cmd/annbench` (a small Go CLI)
+builds a real `internal/ann.HNSW` or `IVFFlat` and prints its search results as JSON;
+`harness/bench/run_recall_benchmark.py` computes an independent brute-force ground truth
+in NumPy and measures actual recall@10 by comparing the two -- not a fabricated or assumed
+number. `harness/bench/test_recall_regression.py` pins the seed, dataset shape, and HNSW
+parameters and asserts recall stays within a tolerance band of a committed baseline, which
+is what makes the gate deterministic instead of a flake generator (PLAN.md's own warning
+about HNSW's randomized level assignment). Results and the exact reproduction command are
+in `docs/benchmarks/04-ann.md`: recall@10 clears the plan's 0.95 target at efSearch=32 on a
+5,000-vector synthetic dataset.
+
+**Still an open question, stated precisely now rather than generally:** the dataset is
+synthetic (Gaussian clusters), not a real embedding corpus (SIFT-1M or similar) -- the
+harness is real and reusable, but has not yet been pointed at real data. IVFFlat's
+centroids are also not k-means-trained (`cmd/annbench` seeds them as the dataset's first N
+vectors), so the HNSW-vs-IVFFlat comparison in the benchmarks doc is against a simple
+baseline, not IVFFlat's actual ceiling.
 
 **Durability was an open question until this session, and the answer turned out not to
 need any HNSW-specific code.** `ReplicatedIndex` (the composition used by every existing

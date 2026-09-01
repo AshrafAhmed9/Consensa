@@ -10,6 +10,7 @@ graphify-out/
 *.test
 *.out
 coverage.*
+harness/bench/.annbench
 
 # Python harness
 __pycache__/
