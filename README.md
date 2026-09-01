@@ -91,6 +91,13 @@ the design decisions and their reasoning, including ones later sessions overturn
   `lease.go`'s clock-bounded validity logic. Closed-timestamp advancement and an actual
   follower-read RPC path are not built on top of it yet -- see
   `docs/notes/09-leases.md`.
+- **A reproduced write-skew anomaly is now actually prevented, not just documented.**
+  `Store.WriteIntent` rejects a write whose timestamp collides with an already-recorded
+  read on the same key; `TestWriteIntentRejectsWriteSkew` reproduces the classic
+  two-doctors-on-call scenario and proves the specific write that would complete it is
+  rejected, with a control case proving unrelated writes are unaffected. This is the
+  conservative reject-and-retry response, not full SSI, and is wired into the in-memory
+  `Store` participant only -- see `docs/notes/14-serializable.md`.
 - **Real metrics, all three.** `consensa_raft_term`, `consensa_range_qps`, and
   `consensa_ann_recall` all report real, live values from a running process. The first
   two are self-measured; recall is pushed by an external benchmark client that computed
@@ -106,9 +113,11 @@ Stated plainly rather than left implied by omission: no automatic range-split tr
 live traffic cutover; outbound connections are now pooled per destination, but multiple
 ranges' messages are still never coalesced into a single wire frame; no joint-consensus
 membership changes wired into the live voting path (the quorum math exists and is
-unit-tested, `internal/raft/membership.go`, but nothing calls it yet); no serializable
-isolation (Phase 14 -- snapshot isolation's write-skew gap is reproduced as a test, not
-yet closed); lease grants replicate correctly but nothing yet advances a closed timestamp
-or serves an actual follower read off one. ANN search is approximate by construction and
+unit-tested, `internal/raft/membership.go`, but nothing calls it yet); serializable isolation is partially closed (Phase 14 -- `Store.WriteIntent` now rejects
+the specific write that completes a reproduced write-skew anomaly, conservatively,
+without full SSI's permissive schedule analysis or read-refresh, and only for the
+in-memory `Store` participant, not yet `DurableStore`; see
+`docs/notes/14-serializable.md`); lease grants replicate correctly but nothing yet
+advances a closed timestamp or serves an actual follower read off one. ANN search is approximate by construction and
 is never described as linearizable; only the register/KV plane makes that claim, and only
 where a test backs it.
