@@ -32,6 +32,7 @@ const (
 	recordPrefix    = "txn/record/"
 	intentPrefix    = "txn/intent/"
 	intentKeysIndex = "txn/intent-keys/"
+	readPrefix      = "txn/read/"
 )
 
 // DurableStore is a Participant backed by a real Raft-replicated range instead of an
@@ -53,13 +54,17 @@ const (
 // is visible to the next call" to hold, which a bare Put does not guarantee but
 // putAndConfirm does, at the cost of blocking until the write is locally readable.
 //
-// Another real, stated gap: Store.WriteIntent (intent.go) now rejects a write whose
-// timestamp collides with an already-recorded read on the same key -- the write-skew
-// defense described in docs/notes/14-serializable.md. DurableStore does not implement
-// RecordRead or the equivalent check yet, so that protection currently exists only in the
-// in-memory Store model this file's own doc comment says the real 2PC logic runs
-// unmodified against; a durable, Raft-replicated per-range TimestampCache is real,
-// separate work this closes for the primitive but not yet for this participant.
+// Like Store, DurableStore now also rejects a write whose timestamp collides with an
+// already-recorded read on the same key -- the write-skew defense described in
+// docs/notes/14-serializable.md -- by durably persisting each key's high-water read mark
+// (readPrefix below) instead of holding it in an in-memory TimestampCache the way Store
+// does. This still is NOT full serializable snapshot isolation: no read-refresh, and (like
+// WriteIntent's existing conflict check above) the read-then-write sequence in
+// checkNotBelowObservedRead/WriteIntent is not atomic with a concurrent RecordRead or
+// WriteIntent to the same key -- the same class of race this file's WriteIntent doc
+// comment already states plainly for the intent-key index, for the same underlying
+// reason: kv.DurableRange has no conditional/compare-and-swap Put to build a race-free
+// version on.
 type DurableStore struct {
 	rng rangeClient
 }
@@ -117,10 +122,15 @@ func (d *DurableStore) Record(id string) (Record, bool) {
 // WriteIntent durably proposes a provisional key/value for a pending transaction, and
 // records the key in that transaction's intent-key index so Resolve can find it again --
 // unlike Store's in-memory map, a real range has no cheap way to enumerate "every intent
-// belonging to transaction X" without such an index.
+// belonging to transaction X" without such an index. It also rejects a write whose
+// timestamp is at or below an already-recorded read of the same key -- see
+// ErrWriteBelowObservedRead and RecordRead below.
 func (d *DurableStore) WriteIntent(intent Intent) error {
 	if existing, ok := d.readIntent(intent.Key); ok && existing.TxnID != intent.TxnID {
 		return errors.New("txn: write intent conflict")
+	}
+	if observed, ok := d.readTimestamp(intent.Key); ok && observed.Compare(intent.Timestamp) >= 0 {
+		return ErrWriteBelowObservedRead
 	}
 	data, err := json.Marshal(intent)
 	if err != nil {
@@ -130,6 +140,35 @@ func (d *DurableStore) WriteIntent(intent Intent) error {
 		return err
 	}
 	return d.appendIntentKey(intent.TxnID, intent.Key)
+}
+
+// RecordRead durably notes that a reader observed key's value as of ts, matching
+// Store.RecordRead's contract: a later WriteIntent to the same key at a timestamp at or
+// below ts is rejected (ErrWriteBelowObservedRead) rather than silently allowed, which is
+// what closes the write-skew read-write edge for this participant too. Only advances the
+// mark forward -- an older read arriving after a newer one must not weaken the bound
+// already in force.
+func (d *DurableStore) RecordRead(key []byte, ts Timestamp) error {
+	if existing, ok := d.readTimestamp(key); ok && existing.Compare(ts) >= 0 {
+		return nil
+	}
+	data, err := json.Marshal(ts)
+	if err != nil {
+		return err
+	}
+	return d.putAndConfirm([]byte(readPrefix+string(key)), data)
+}
+
+func (d *DurableStore) readTimestamp(key []byte) (Timestamp, bool) {
+	data, err := d.rng.Get([]byte(readPrefix + string(key)))
+	if err != nil {
+		return Timestamp{}, false
+	}
+	var ts Timestamp
+	if err := json.Unmarshal(data, &ts); err != nil {
+		return Timestamp{}, false
+	}
+	return ts, true
 }
 
 // Resolve durably applies or discards every intent this replica knows belongs to record's

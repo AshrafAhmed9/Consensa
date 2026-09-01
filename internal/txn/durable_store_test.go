@@ -1,6 +1,7 @@
 package txn
 
 import (
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -190,5 +191,64 @@ func TestDurableStoreRecordSurvivesRestart(t *testing.T) {
 	}
 	if v, err := restarted.Get([]byte("balance")); err != nil || string(v) != "42" {
 		t.Fatalf("balance did not survive restart: %q, %v", v, err)
+	}
+}
+
+// TestDurableStoreRejectsWriteSkew is TestWriteIntentRejectsWriteSkew's real-Raft
+// counterpart: the same two-doctors-on-call anomaly, but RecordRead and WriteIntent both
+// go through a real 3-node kv.DurableRange group instead of the in-memory Store, proving
+// the durably-persisted read high-water mark (readPrefix, durable_store.go) actually
+// rejects the anomaly-completing write once it has replicated -- not just once the
+// call to RecordRead itself has returned, which durable_store.go's putAndConfirm exists
+// specifically to close (see PutRecord's own doc comment).
+func TestDurableStoreRejectsWriteSkew(t *testing.T) {
+	rng := startDurableRange(t, 1)
+	store := NewDurableStore(rng)
+
+	// Put only returns once locally appended, not once committed/applied (see
+	// kv.DurableRange.Put's own doc comment) -- seedAndConfirm waits for the value to
+	// actually become locally readable before proceeding, the same reason putAndConfirm
+	// exists in durable_store.go itself, rather than racing ahead of replication.
+	seedAndConfirm := func(key, value string) {
+		t.Helper()
+		if err := rng.Put([]byte(key), []byte(value)); err != nil {
+			t.Fatalf("seed %s: %v", key, err)
+		}
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if got, err := rng.Get([]byte(key)); err == nil && string(got) == value {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("seed %s never became visible", key)
+	}
+	seedAndConfirm("doctor-a", "on-call")
+	seedAndConfirm("doctor-b", "on-call")
+
+	t1, t2 := Timestamp{WallTime: 100}, Timestamp{WallTime: 200}
+
+	if v, err := rng.Get([]byte("doctor-a")); err != nil || string(v) != "on-call" {
+		t.Fatalf("T2 read doctor-a = %q, %v", v, err)
+	}
+	if err := store.RecordRead([]byte("doctor-a"), t2); err != nil {
+		t.Fatalf("RecordRead: %v", err)
+	}
+
+	if v, err := rng.Get([]byte("doctor-b")); err != nil || string(v) != "on-call" {
+		t.Fatalf("T1 read doctor-b = %q, %v", v, err)
+	}
+
+	if err := store.WriteIntent(Intent{Key: []byte("doctor-b"), Value: []byte("off-call"), TxnID: "t2", Timestamp: t2}); err != nil {
+		t.Fatalf("T2's write to doctor-b unexpectedly rejected: %v", err)
+	}
+
+	err := store.WriteIntent(Intent{Key: []byte("doctor-a"), Value: []byte("off-call"), TxnID: "t1", Timestamp: t1})
+	if !errors.Is(err, ErrWriteBelowObservedRead) {
+		t.Fatalf("T1's write to doctor-a = %v, want ErrWriteBelowObservedRead -- write skew was not prevented over real Raft replication", err)
+	}
+
+	if err := store.WriteIntent(Intent{Key: []byte("doctor-c"), Value: []byte("off-call"), TxnID: "t1", Timestamp: t1}); err != nil {
+		t.Fatalf("unrelated write incorrectly rejected: %v", err)
 	}
 }
