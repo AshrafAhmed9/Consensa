@@ -70,6 +70,15 @@ account and the decision to leave it unfixed for now; the gap is proven permanen
 `TestAsymmetricPartitionDisruptsHealthyLeader` in `internal/raft/cluster_test.go`, not
 just described. `docs/notes/06-torture.md` has the trace-level path that led here.
 
+**The vector workload is now real too, closing the last "checks a fixed, hardcoded
+value" gap in the torture harness.** `cmd/vectortorture` drives real per-replica
+`internal/ann.HNSW` graphs through the same fault-injectable `raft.Cluster` path
+`cmd/torture` uses, checking that every replica which applied the same number of
+mutations has a byte-identical graph and no replica ever contains a duplicate ID.
+Verified clean across 60 seeds under `partition`/`crash` faults at 5 nodes. It does not
+check recall — see `docs/notes/06-torture.md`'s vector-workload section for why that
+would conflate two different claims this document is careful to keep separate.
+
 Two things beyond unit tests are now proven, both by dedicated integration tests:
 
 - **Real transport, real failover.** `internal/raft/host_test.go` runs three `Host`

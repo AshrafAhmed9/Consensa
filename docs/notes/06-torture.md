@@ -129,3 +129,29 @@ harness can generate at all (ADR-007). Random seeded search was the right first 
 but neither gap needed more seeds -- both needed a human to construct the exact
 adversarial sequence, same as `TestFigure8CommitRule` already did at the single-node
 level before this session extended it to a full multi-node proof.
+
+## The vector workload is now real too
+
+**Until this session, `vector.run()` checked a fixed, hardcoded three-element ID list --
+seed- and nemesis-independent, and never touching the real Go HNSW implementation at
+all.** `ann.ReplicatedIndex`, the existing in-memory Raft+HNSW composition, could not be
+reused to fix this: its `commit()` always uses `Cluster.Propose` (always delivers every
+message) and errors if any replica is missing a just-proposed entry -- exactly the
+behavior a fault schedule needs to be able to produce. `cmd/vectortorture` (new) fixes
+this the same way `cmd/torture` fixed `register.run()`: it drives `internal/raft.Cluster`
+and per-replica `internal/ann.HNSW` graphs directly via `TickFiltered`/`ProposeFiltered`,
+tolerating replicas that fall behind under a fault instead of treating that as an error.
+
+**What it checks:** after the run, every replica that applied the same number of
+committed mutations must have a byte-identical graph snapshot (the replication-
+determinism property `ann.ReplicatedIndex`'s own unit tests already prove without chaos,
+now proven under real partitions and crashes), and no replica's graph may contain a
+duplicate ID. Verified clean across 60 seeds with `nodes=5`, `partition+crash` faults, 25
+rounds each -- no snapshot divergence, no duplicate IDs, matching the same
+`Cluster.Leader()` fix this session made for the register workload (both drivers share
+that method).
+
+**What it deliberately does not check, matching `docs/correctness.md`'s claims
+discipline:** search quality/recall. ANN search is approximate by construction;
+`harness/bench/run_recall_benchmark.py` is the tool for that claim, and this workload
+does not conflate the two.
