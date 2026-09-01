@@ -113,13 +113,30 @@ func (c *Cluster) ProposeFiltered(leader NodeID, data []byte, deliver func(Messa
 }
 
 // Leader returns the current elected leader, if the group has completed an election.
+//
+// More than one node can believe itself Leader at once -- a node isolated by a partition
+// keeps its stale role and term until it reconnects and hears a higher term, which is
+// exactly the "zombie leader" scenario Raft's safety properties tolerate rather than
+// prevent. Breaking the tie by highest term (rather than by c.nodes' undefined map
+// iteration order, which the previous version did) picks the node a real client would
+// actually observe as current: the isolated node's term cannot exceed a live quorum's,
+// so this can never surface the stale side once a real replacement has been elected.
 func (c *Cluster) Leader() (NodeID, bool) {
+	var (
+		leader     NodeID
+		leaderTerm uint64
+		found      bool
+	)
 	for id, replica := range c.nodes {
-		if replica.(*node).role == Leader {
-			return id, true
+		n := replica.(*node)
+		if n.role != Leader {
+			continue
+		}
+		if !found || n.term > leaderTerm {
+			leader, leaderTerm, found = id, n.term, true
 		}
 	}
-	return 0, false
+	return leader, found
 }
 
 // Status reports the elected leader and its term for administrative surfaces.

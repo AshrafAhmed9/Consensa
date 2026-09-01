@@ -111,3 +111,50 @@ func TestFilteredMethodsMatchInPackageIsolation(t *testing.T) {
 		t.Fatalf("applied = %#v after reconnecting, want the proposal to commit", got)
 	}
 }
+
+// TestLeaderPrefersHighestTermDuringSustainedIsolation proves Leader() cannot report a
+// stale "zombie leader" once the reachable majority has elected a real replacement at a
+// higher term. Before this fix, Leader() picked among role==Leader nodes using Go's
+// undefined map iteration order, so during a sustained isolation it could return either
+// the old, isolated leader (term N) or the new one the majority actually elected
+// (term > N) depending on iteration order alone -- corrupting anything built on top of
+// it (cmd/torture found this at ~15% of seeds once sustained-window faults were added;
+// see docs/notes/06-torture.md).
+func TestLeaderPrefersHighestTermDuringSustainedIsolation(t *testing.T) {
+	c, err := NewCluster([]NodeID{1, 2, 3, 4, 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := c.Tick(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	staleLeader, ok := c.Leader()
+	if !ok {
+		t.Fatal("no leader elected")
+	}
+	isolate := func(m Message) bool { return m.From != staleLeader && m.To != staleLeader }
+	// Isolate the leader long enough for the majority's election timers (staggered
+	// 3..7 ticks in NewCluster) to elect a real replacement at a higher term, without
+	// ever reconnecting the stale leader.
+	for i := 0; i < 10; i++ {
+		if err := c.TickFiltered(isolate); err != nil {
+			t.Fatal(err)
+		}
+	}
+	newLeader, ok := c.Leader()
+	if !ok {
+		t.Fatal("no leader reported during sustained isolation")
+	}
+	if newLeader == staleLeader {
+		t.Fatalf("Leader() returned the isolated, stale leader (%d); the majority should have elected a real replacement", staleLeader)
+	}
+	// This is the property that actually matters: repeated calls must agree, not flip
+	// between the stale and real leader depending on map iteration.
+	for i := 0; i < 10; i++ {
+		if again, _ := c.Leader(); again != newLeader {
+			t.Fatalf("Leader() is unstable across repeated calls: got %d then %d", newLeader, again)
+		}
+	}
+}

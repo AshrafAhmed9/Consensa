@@ -14,18 +14,39 @@ replicated API workloads across the full fault matrix (`PLAN.md` Phase 6), not b
 this session, `register.run()` checked a fixed, hand-written history — the seed and
 `--nemesis` flags existed but had no effect on the outcome. `cmd/torture` now drives a
 real `raft.Cluster` under the seed's actual fault schedule and exports a real
-client-observable history for `is_linearizable` to check (`docs/notes/06-torture.md` has
-the full account, including two deliberately injected bugs the harness was tested against
-per this phase's own DoD — one it currently cannot catch, with the precise, understood
-reason why: `nemesis.schedule()` generates single-round fault windows, and a node needs
-3-5 consecutive ticks without a leader before its own election machinery even activates,
-so the current model cannot destabilize leadership regardless of seed count). This is a
-real limitation of the fault *model*, not evidence the checker is decorative — the checker
-itself is independently proven to reject a bad history in
+client-observable history for `is_linearizable` to check. This is a real limitation of
+the fault *model*, not evidence the checker is decorative — the checker itself is
+independently proven to reject a bad history in
 `harness/torture/checker/test_linearizability.py`, and the Go-driven history correctly
 reflects genuine fault effects (a proposal to an isolated "zombie leader" is correctly
 never recorded as a successful write; reads during isolation correctly return stale, not
 phantom, values).
+
+**A real bug was found and fixed in this session, by the harness — not the workload it
+was built to test.** Making the fault schedule generate sustained multi-round isolation
+windows (instead of single-round events) immediately exposed a genuine correctness bug in
+`Cluster.Leader()`: it picked among nodes with `role == Leader` using Go's undefined map
+iteration order, so during a sustained isolation, a stale "zombie leader" and the real,
+higher-term replacement elected by the majority could both be returned inconsistently
+across rounds — corrupting the driver's history with false non-linearizability, at
+roughly a 15% rate per seed. Fixed by breaking the tie on highest term, which is always
+the node a real client would actually observe as current. This is a permanent fix to a
+widely shared method (`ann.ReplicatedIndex`, `kv.multiraft`, and this harness all call
+`Cluster.Leader()`), not a narrow harness-only patch. With it fixed, the harness runs
+clean across 200+ seeds against the correct implementation.
+
+**Whether the harness can catch a deliberately injected safety bug (this phase's own
+DoD) is still open, now for a more precise reason than before.** Two bugs were tried
+again post-fix (weakening Figure-8's commit rule; disabling pre-vote's freshness check),
+500+ seeds combined, and neither was caught. Traced to a mechanism, not a vague
+insufficiency: `Node.Tick()` never attempts an election for a node that already believes
+it is leader, so isolating the *leader* — which is what a uniformly random fault target
+does roughly `1/nodes` of the time, and is what happened at the seed that misleadingly
+"passed" before the `Leader()` fix was found — never exercises either weakened check at
+all. Exercising them needs the isolated node to specifically be a non-leader follower
+that keeps re-campaigning while cut off and then reconnects at an inflated term while a
+healthy leader still stands — a scripted sequence, not a property of window length alone.
+`docs/notes/06-torture.md` has the full trace-level account.
 
 Two things beyond unit tests are now proven, both by dedicated integration tests:
 
