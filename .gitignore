@@ -11,6 +11,7 @@ graphify-out/
 *.out
 coverage.*
 harness/bench/.annbench
+harness/torture/.torture-bin
 
 # Python harness
 __pycache__/

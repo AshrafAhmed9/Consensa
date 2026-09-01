@@ -9,8 +9,18 @@ from harness.torture.workload import register, vector
 
 
 def execute(seed: int, workload: str, nemeses: list[str]) -> bool:
-    """Runs one deterministic reference workload and records only a failing schedule."""
-    passed = {"register": register.run, "vector": vector.run}[workload]()
+    """Runs one deterministic reference workload and records only a failing schedule.
+
+    register drives a real Raft cluster (internal/raft.Cluster via cmd/torture) under the
+    seed's fault schedule and checks a real resulting history -- the seed and nemeses
+    genuinely determine the outcome. vector does not yet: see
+    harness/torture/workload/vector.py's docstring for why, and do not read a passing
+    vector run as evidence of anything beyond its fixed, seed-independent check.
+    """
+    if workload == "register":
+        passed = register.run(seed, nemeses)
+    else:
+        passed = vector.run()
     events = [fault.__dict__ for fault in schedule(seed, nemeses, 20)]
     if not passed:
         write_history(Path("harness/torture/results") / f"seed-{seed}.json", History(seed, workload, events))

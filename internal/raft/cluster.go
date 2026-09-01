@@ -86,6 +86,32 @@ func (c *Cluster) Propose(leader NodeID, data []byte) error {
 	return c.Deliver()
 }
 
+// TickFiltered advances every replica one logical tick, then delivers using deliver instead
+// of Tick's always-connected delivery. This is what an external fault-injection driver (see
+// cmd/torture) needs and could not otherwise get: Tick alone can only ever model a fully
+// reliable network from outside this package, since c.nodes is unexported and Deliver's
+// predicate defaults to "always true."
+func (c *Cluster) TickFiltered(deliver func(Message) bool) error {
+	for _, n := range c.nodes {
+		n.Tick()
+	}
+	return c.DeliverFiltered(deliver)
+}
+
+// ProposeFiltered submits through a specified leader and delivers using deliver instead of
+// Propose's always-connected delivery, so an external driver can test what happens to a
+// proposal issued during a partition or into an isolated leader.
+func (c *Cluster) ProposeFiltered(leader NodeID, data []byte, deliver func(Message) bool) error {
+	n := c.nodes[leader]
+	if n == nil {
+		return errors.New("raft: unknown leader")
+	}
+	if err := n.Propose(data); err != nil {
+		return err
+	}
+	return c.DeliverFiltered(deliver)
+}
+
 // Leader returns the current elected leader, if the group has completed an election.
 func (c *Cluster) Leader() (NodeID, bool) {
 	for id, replica := range c.nodes {

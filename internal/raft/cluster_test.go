@@ -76,3 +76,38 @@ func TestPartitionedLeaderCannotCommit(t *testing.T) {
 		t.Fatalf("isolated leader applied %#v", got)
 	}
 }
+
+// TestFilteredMethodsMatchInPackageIsolation proves TickFiltered/ProposeFiltered (the
+// exported surface an external fault-injection driver like cmd/torture must use, since it
+// cannot reach c.nodes directly) produce the identical isolation behavior as the
+// in-package DeliverFiltered pattern TestPartitionedLeaderCannotCommit above uses.
+func TestFilteredMethodsMatchInPackageIsolation(t *testing.T) {
+	c, err := NewCluster([]NodeID{1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := c.TickFiltered(func(Message) bool { return true }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leader, ok := c.Leader()
+	if !ok {
+		t.Fatal("no leader elected")
+	}
+	isolate := func(m Message) bool { return m.From != leader && m.To != leader }
+	if err := c.ProposeFiltered(leader, []byte("unsafe"), isolate); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Applied(leader); len(got) != 0 {
+		t.Fatalf("isolated leader applied %#v, want nothing committed while cut off from the majority", got)
+	}
+	// Reconnecting must let the previously isolated proposal actually commit -- proves
+	// isolation was transient (this round only), not a permanent, silently broken cluster.
+	if err := c.TickFiltered(func(Message) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Applied(leader); len(got) != 1 {
+		t.Fatalf("applied = %#v after reconnecting, want the proposal to commit", got)
+	}
+}

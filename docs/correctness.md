@@ -10,6 +10,23 @@ end-to-end distributed cluster under the seeded fault-injection matrix the plan 
 for; that claim will be added only after the Python torture harness drives real
 replicated API workloads across the full fault matrix (`PLAN.md` Phase 6), not before.
 
+**The register workload is now real, and its current limit is precisely known.** Before
+this session, `register.run()` checked a fixed, hand-written history — the seed and
+`--nemesis` flags existed but had no effect on the outcome. `cmd/torture` now drives a
+real `raft.Cluster` under the seed's actual fault schedule and exports a real
+client-observable history for `is_linearizable` to check (`docs/notes/06-torture.md` has
+the full account, including two deliberately injected bugs the harness was tested against
+per this phase's own DoD — one it currently cannot catch, with the precise, understood
+reason why: `nemesis.schedule()` generates single-round fault windows, and a node needs
+3-5 consecutive ticks without a leader before its own election machinery even activates,
+so the current model cannot destabilize leadership regardless of seed count). This is a
+real limitation of the fault *model*, not evidence the checker is decorative — the checker
+itself is independently proven to reject a bad history in
+`harness/torture/checker/test_linearizability.py`, and the Go-driven history correctly
+reflects genuine fault effects (a proposal to an isolated "zombie leader" is correctly
+never recorded as a successful write; reads during isolation correctly return stale, not
+phantom, values).
+
 Two things beyond unit tests are now proven, both by dedicated integration tests:
 
 - **Real transport, real failover.** `internal/raft/host_test.go` runs three `Host`
