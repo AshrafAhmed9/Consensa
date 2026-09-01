@@ -23,6 +23,9 @@ type Node interface {
 	Propose([]byte) error
 	Ready() Ready
 	Advance()
+	// Status reports this replica's own view of its role and term, for administrative
+	// and diagnostic surfaces. It is read-only and never changes protocol behavior.
+	Status() (Role, uint64)
 }
 type node struct {
 	id                                                             NodeID
@@ -129,6 +132,8 @@ func (n *node) Advance() {
 	n.log.applied = n.log.committed
 	n.lastHard = HardState{Term: n.term, Vote: n.vote, Commit: n.log.committed}
 }
+
+func (n *node) Status() (Role, uint64) { return n.role, n.term }
 func (n *node) send(m Message) { m.From = n.id; n.msgs = append(n.msgs, m) }
 func (n *node) becomeFollower(term uint64, leader NodeID) {
 	n.role = Follower

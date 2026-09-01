@@ -49,6 +49,15 @@ func NewHost(config HostConfig) (*Host, error) {
 // Addr returns the peer address assigned to this host.
 func (h *Host) Addr() string { return h.transport.Addr().String() }
 
+// Status reports this replica's own role and term. Like the rest of Raft, this is this
+// node's local view -- it can be stale relative to the cluster during a partition or a
+// pending election, which is expected and not itself an error condition.
+func (h *Host) Status() (Role, uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.node.Status()
+}
+
 // Tick advances election/heartbeat time and executes the emitted Ready work.
 func (h *Host) Tick() error {
 	h.mu.Lock()

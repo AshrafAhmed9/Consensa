@@ -1,9 +1,20 @@
-// Command consensa starts a gRPC API process backed by an in-memory Raft group.
+// Command consensa starts one replica of a real, disk-durable, TCP-networked vector store:
+// a Raft host (internal/raft.Host) over real sockets, backed by a real storage.Engine, with
+// its own HNSW graph (internal/ann.DurableNode) applying committed mutations. Every node in
+// a deployment runs this same binary with the same --peers list and a different --id.
 package main
 
 import (
 	"flag"
 	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
 	consensav1 "github.com/ashraf/consensa/api/consensa/v1"
 	"github.com/ashraf/consensa/internal/ann"
 	"github.com/ashraf/consensa/internal/metrics"
@@ -11,45 +22,123 @@ import (
 	"github.com/ashraf/consensa/internal/server"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
-	"log"
-	"net"
-	"net/http"
 )
 
 func main() {
-	listen := flag.String("listen", ":8080", "gRPC listen address")
+	id := flag.Uint64("id", 0, "this node's Raft ID (must be a key in --peers)")
+	peersFlag := flag.String("peers", "", `Raft group members and their transport addresses, e.g. "1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003" -- identical on every node in the deployment`)
+	dataDir := flag.String("data-dir", "", "on-disk directory for this node's storage engine and Raft log (required, unique per node)")
+	grpcListen := flag.String("grpc-listen", ":8080", "client-facing gRPC listen address")
 	dimension := flag.Int("dimension", 3, "fixed collection vector dimension")
-	replicas := flag.Int("replicas", 3, "in-memory Raft replicas")
 	metricsListen := flag.String("metrics-listen", ":9090", "Prometheus metrics listen address")
+	tickInterval := flag.Duration("tick-interval", 50*time.Millisecond, "how often this node advances its Raft clock")
 	flag.Parse()
-	if *replicas < 1 {
-		log.Fatal("replicas must be positive")
+
+	if *id == 0 {
+		log.Fatal("consensa: --id is required and must be nonzero")
 	}
-	ids := make([]raft.NodeID, *replicas)
-	for i := range ids {
-		ids[i] = raft.NodeID(i + 1)
+	if *dataDir == "" {
+		log.Fatal("consensa: --data-dir is required")
 	}
-	index, err := ann.NewReplicatedIndex(ids, ann.Config{Dimension: *dimension, M: 16, EFConstruction: 64, EFSearch: 64, Seed: 1})
+
+	allPeers, err := parsePeers(*peersFlag)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("consensa: --peers: %v", err)
 	}
+	selfID := raft.NodeID(*id)
+	selfAddr, ok := allPeers[selfID]
+	if !ok {
+		log.Fatalf("consensa: --id %d is not present in --peers", *id)
+	}
+	groupPeers := make([]raft.NodeID, 0, len(allPeers))
+	transportPeers := make(map[raft.NodeID]string, len(allPeers)-1)
+	for peerID, addr := range allPeers {
+		groupPeers = append(groupPeers, peerID)
+		if peerID != selfID {
+			transportPeers[peerID] = addr
+		}
+	}
+	sort.Slice(groupPeers, func(i, j int) bool { return groupPeers[i] < groupPeers[j] })
+
+	node, err := ann.NewDurableNode(ann.DurableNodeConfig{
+		ID: selfID, GroupPeers: groupPeers, ListenAddress: selfAddr, TransportPeers: transportPeers,
+		StorageDir: *dataDir, Index: ann.Config{Dimension: *dimension, M: 16, EFConstruction: 64, EFSearch: 64, Seed: 1},
+	})
+	if err != nil {
+		log.Fatalf("consensa: starting durable node: %v", err)
+	}
+	defer func() {
+		if err := node.Close(); err != nil {
+			log.Printf("consensa: closing node: %v", err)
+		}
+	}()
+
+	// Raft only makes progress when something drives its clock; production wires that to
+	// a real timer instead of the deterministic simulator's stepped scheduler tests use.
+	stopTicking := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(*tickInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopTicking:
+				return
+			case <-ticker.C:
+				// A tick error here means "not leader" or a dial failure to a peer that
+				// is temporarily down -- both are ordinary and handled by internal/raft's
+				// own retry-on-next-heartbeat behavior, not something this loop must react to.
+				_ = node.Tick()
+			}
+		}
+	}()
+	defer close(stopTicking)
+
 	metricRegistry := metrics.NewRegistry()
-	if _, term, elected := index.Status(); elected {
-		metricRegistry.RaftTerm.Set(float64(term))
-	}
 	go func() {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.HandlerFor(metricRegistry.Registry, promhttp.HandlerOpts{}))
 		if err := http.ListenAndServe(*metricsListen, mux); err != nil {
-			log.Printf("metrics server stopped: %v", err)
+			log.Printf("consensa: metrics server stopped: %v", err)
 		}
 	}()
-	l, err := net.Listen("tcp", *listen)
+
+	listener, err := net.Listen("tcp", *grpcListen)
 	if err != nil {
 		log.Fatal(err)
 	}
-	g := grpc.NewServer()
-	consensav1.RegisterConsensaServer(g, server.NewService(index))
-	log.Printf("consensa listening on %s; metrics on %s/metrics", *listen, fmt.Sprintf("http://%s", *metricsListen))
-	log.Fatal(g.Serve(l))
+	grpcServer := grpc.NewServer()
+	// DurableNode satisfies server.Index directly: Insert/Delete only succeed when this
+	// replica is the current Raft leader (see DurableNode.Insert's doc comment), so a
+	// client that gets a "not leader" error is expected to retry against another node in
+	// --peers -- this binary does not yet forward writes to the leader on a client's
+	// behalf. Reads (Search/Validate) are served locally regardless of leadership.
+	consensav1.RegisterConsensaServer(grpcServer, server.NewService(node))
+	log.Printf("consensa node %d: raft on %s, gRPC on %s, metrics on http://%s/metrics, data in %s",
+		selfID, selfAddr, *grpcListen, fmt.Sprintf("%s", *metricsListen), *dataDir)
+	log.Fatal(grpcServer.Serve(listener))
+}
+
+// parsePeers turns "1=host:port,2=host:port" into a NodeID -> address map. It is deliberately
+// strict: a malformed entry fails the whole process at startup rather than silently running
+// with a smaller cluster than the operator intended.
+func parsePeers(raw string) (map[raft.NodeID]string, error) {
+	if raw == "" {
+		return nil, fmt.Errorf("must not be empty")
+	}
+	peers := map[raft.NodeID]string{}
+	for _, entry := range strings.Split(raw, ",") {
+		parts := strings.SplitN(entry, "=", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return nil, fmt.Errorf("malformed entry %q, want id=host:port", entry)
+		}
+		id, err := strconv.ParseUint(parts[0], 10, 64)
+		if err != nil || id == 0 {
+			return nil, fmt.Errorf("malformed node ID in %q: %v", entry, err)
+		}
+		peers[raft.NodeID(id)] = parts[1]
+	}
+	if len(peers) < 1 {
+		return nil, fmt.Errorf("must name at least one node")
+	}
+	return peers, nil
 }

@@ -145,6 +145,17 @@ func (d *DurableNode) Validate(v vector.Vector) error {
 // "127.0.0.1:0" and the OS assigned the actual port.
 func (d *DurableNode) Addr() string { return d.host.Addr() }
 
+// Status reports this replica's own view of its Raft role and term, matching the shape
+// server.Service.Status already expects via a duck-typed interface. The leader-ID return
+// value is a stand-in for "this node believes it is the leader" rather than a genuine
+// cluster-wide leader ID -- Host does not currently expose the leader ID a follower has
+// heard from, only its own role, and that gap is fine for now (it just means Status on a
+// follower cannot yet answer "so who IS the leader?").
+func (d *DurableNode) Status() (id raft.NodeID, term uint64, isLeader bool) {
+	role, term := d.host.Status()
+	return 0, term, role == raft.Leader
+}
+
 // Close stops the transport and closes the storage engine. It does not delete StorageDir:
 // a caller that reopens NewDurableNode against the same directory afterward is exactly the
 // crash-restart-and-recover scenario this type exists to support.

@@ -1,6 +1,66 @@
+# A real 3-node cluster: three separate containers, each running the same `consensa`
+# binary with a different --id, talking Raft over the compose network's internal DNS
+# (service names resolve as hostnames), each with its own named volume so a container
+# restart is a genuine crash-and-recover test, not a fresh, empty node.
+#
+# Try it: from the repo root,
+#   docker compose -f deploy/docker-compose.yml up --build
+# then, in another terminal, kill one node and watch it recover on restart:
+#   docker compose -f deploy/docker-compose.yml kill consensa3
+#   docker compose -f deploy/docker-compose.yml up -d consensa3
+x-common: &common
+  build:
+    context: ..
+    dockerfile: Dockerfile
+  command:
+    - -peers=1=consensa1:9001,2=consensa2:9001,3=consensa3:9001
+    - -dimension=3
+    - -data-dir=/data
+    - -grpc-listen=:8080
+    - -metrics-listen=:9090
+  profiles: ["demo"]
+
 services:
-  consensa:
-    build: ..
-    command: ["consensa", "-listen", ":8080", "-dimension", "3"]
-    ports: ["8080:8080"]
-    profiles: ["demo"]
+  consensa1:
+    <<: *common
+    hostname: consensa1
+    command:
+      - -id=1
+      - -peers=1=consensa1:9001,2=consensa2:9001,3=consensa3:9001
+      - -dimension=3
+      - -data-dir=/data
+      - -grpc-listen=:8080
+      - -metrics-listen=:9090
+    ports: ["8081:8080", "9091:9090"]
+    volumes: ["consensa1-data:/data"]
+
+  consensa2:
+    <<: *common
+    hostname: consensa2
+    command:
+      - -id=2
+      - -peers=1=consensa1:9001,2=consensa2:9001,3=consensa3:9001
+      - -dimension=3
+      - -data-dir=/data
+      - -grpc-listen=:8080
+      - -metrics-listen=:9090
+    ports: ["8082:8080", "9092:9090"]
+    volumes: ["consensa2-data:/data"]
+
+  consensa3:
+    <<: *common
+    hostname: consensa3
+    command:
+      - -id=3
+      - -peers=1=consensa1:9001,2=consensa2:9001,3=consensa3:9001
+      - -dimension=3
+      - -data-dir=/data
+      - -grpc-listen=:8080
+      - -metrics-listen=:9090
+    ports: ["8083:8080", "9093:9090"]
+    volumes: ["consensa3-data:/data"]
+
+volumes:
+  consensa1-data:
+  consensa2-data:
+  consensa3-data:
