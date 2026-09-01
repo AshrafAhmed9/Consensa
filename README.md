@@ -72,6 +72,14 @@ the design decisions and their reasoning, including ones later sessions overturn
   search leakage, and recall staying high after the split; the KV plane (`DurableRange`)
   shows no key lost or duplicated and no cross-boundary key surviving in either child,
   reading the parent's real state via `DurableRange.AllKeys()`.
+- **The split-trigger decision is real for the KV plane.** `ShouldSplit`/
+  `DurableRange.MaybeSplitKey` decide when a range has grown past a size threshold and
+  pick the median key of its real applied data as the split point; a real 3-node group
+  growing past threshold and having that trigger-chosen key drive the same proven
+  migration pipeline above is checked directly
+  (`TestMaybeSplitKeyDrivesARealLiveSplit`). This is the decision only -- no timer or QPS
+  counter calls it automatically, and no live traffic cutover exists (this project has no
+  dynamic routing update path yet) -- see `docs/notes/12-split-repair.md`.
 - **Multi-range outbound connections are pooled, not dialed per message.** Ranges on one
   node sharing a destination now reuse one persistent TCP connection
   (`MultiplexedTransport`'s `connFor`/`pooledConn`) instead of each `Send` dialing fresh --
@@ -114,8 +122,10 @@ the design decisions and their reasoning, including ones later sessions overturn
 
 ## What is explicitly not done yet
 
-Stated plainly rather than left implied by omission: no automatic range-split trigger or
-live traffic cutover; outbound connections are now pooled per destination, but multiple
+Stated plainly rather than left implied by omission: the split-trigger *decision* is real
+for the KV plane (size threshold only, no QPS trigger), but nothing calls it
+automatically and there is no live traffic cutover on either plane; outbound connections
+are now pooled per destination, but multiple
 ranges' messages are still never coalesced into a single wire frame; no joint-consensus
 membership changes wired into the live voting path (the quorum math exists and is
 unit-tested, `internal/raft/membership.go`, but nothing calls it yet); serializable isolation is partially closed (Phase 14 -- both `Store` and `DurableStore`
