@@ -40,6 +40,23 @@ non-recursive split whose invariant was baked into the split action's own precon
 so it also couldn't fail); it now allows re-splitting any existing range, and TLC explores
 every recursive partition of a 3-key space without finding a gap or overlap.
 
-Also still true: this proves the protocol model, not the Go implementation. The Go raft
-package (`internal/raft`) and the future joint-consensus and split code (Phases 11–12)
-must be read against this argument by a person — TLC does not check Go source.
+Also still true: this proves the protocol model, not the Go implementation. **Re-verified
+this session**: `specs/Makefile`'s `make check` still passes exactly as documented above
+(`membership.tla` 0 violations, `membership_broken.tla` fails in 7 steps with the same
+counterexample, `split.tla` 0 violations) — the specs were not just written once and left
+untested, they still hold.
+
+**A real Go implementation of the spec's dual-majority quorum math already exists
+(`internal/raft/membership.go`'s `Membership`/`HasQuorum`), correct and unit-tested, but
+it has zero callers** -- `node.go`'s live `quorum()`/`advanceCommit()`/vote-counting path
+still uses a single fixed majority, with no awareness of `Membership` at all. This is the
+same built-but-unwired pattern this project has found and closed several times this
+session elsewhere (the torture harness's two workloads, `internal/txn`, `kv.lease`) --
+deliberately NOT closed here, because wiring `Membership` into `node.go`'s live
+`Step`/`advanceCommit`/`handleVoteResp` path is a change to the exact safety-critical
+code this session's `TestFigure8UnsafeCommitWouldBeOverwritten` and
+`TestAsymmetricPartitionDisruptsHealthyLeader` depend on staying correct — genuinely
+Phase 11's full ~2-3 week scope, and not something to rush through in the same pass as
+everything else. The TLA+ spec is exactly what should guide that work when it happens:
+it already states the invariant (`HasQuorum` must require a majority of both `Old` and
+`New` during the joint phase) that the eventual `node.go` change has to preserve.
