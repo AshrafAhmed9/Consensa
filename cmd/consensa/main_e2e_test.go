@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,6 +104,36 @@ func waitForListening(t *testing.T, addr string, deadline time.Duration) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("nothing listening on %s within %s: %v", addr, deadline, lastErr)
+}
+
+// raftTermFromMetrics fetches the real /metrics endpoint and parses out
+// consensa_raft_term's current value -- a minimal, direct Prometheus text-format read
+// rather than pulling in a client library just to check one line this test controls.
+func raftTermFromMetrics(t *testing.T, metricAddr string) int {
+	t.Helper()
+	resp, err := http.Get(fmt.Sprintf("http://%s/metrics", metricAddr))
+	if err != nil {
+		t.Fatalf("fetching /metrics from %s: %v", metricAddr, err)
+	}
+	defer resp.Body.Close()
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "consensa_raft_term ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		value, err := strconv.ParseFloat(fields[1], 64)
+		if err != nil {
+			t.Fatalf("parsing consensa_raft_term value %q: %v", fields[1], err)
+		}
+		return int(value)
+	}
+	t.Fatalf("consensa_raft_term not found in /metrics output from %s", metricAddr)
+	return 0
 }
 
 func dialNode(t *testing.T, addr string) consensav1.ConsensaClient {
@@ -224,6 +258,19 @@ func TestConsensaBinaryThreeProcessClusterSurvivesKillAndRestart(t *testing.T) {
 		}
 		if len(results) != 1 || results[0].Id != "a" {
 			t.Fatalf("node %d: search for nearest to (1,0,0,0) = %v, want [a]", id, results)
+		}
+	}
+
+	// The metrics registry (internal/metrics) was previously registered and exposed over
+	// HTTP but never actually updated -- /metrics would always report consensa_raft_term
+	// at its zero value forever, regardless of real cluster activity. Now that the tick
+	// loop sets it from the real node.Status() on every tick, confirm the real value: by
+	// this point in the test three real elections' worth of writes have gone through, so
+	// every node's term must be a real positive number, not the un-set zero.
+	for _, id := range ids {
+		term := raftTermFromMetrics(t, nodes[id].metricAddr)
+		if term < 1 {
+			t.Fatalf("node %d: consensa_raft_term = %d over /metrics, want >= 1 after real elections", id, term)
 		}
 	}
 

@@ -73,6 +73,8 @@ func main() {
 		}
 	}()
 
+	metricRegistry := metrics.NewRegistry()
+
 	// Raft only makes progress when something drives its clock; production wires that to
 	// a real timer instead of the deterministic simulator's stepped scheduler tests use.
 	stopTicking := make(chan struct{})
@@ -88,12 +90,18 @@ func main() {
 				// is temporarily down -- both are ordinary and handled by internal/raft's
 				// own retry-on-next-heartbeat behavior, not something this loop must react to.
 				_ = node.Tick()
+				// RangeQPS and Recall stay at their registered zero value here -- neither
+				// has a real source wired to this loop yet (QPS needs request counting in
+				// server.Service, recall needs a benchmark hook). Reporting them anyway
+				// would be exactly the kind of fabricated-looking metric this project's
+				// own documentation standard argues against; leaving them at zero is
+				// honest about what is and isn't measured, not a placeholder to hide.
+				_, term, _ := node.Status()
+				metricRegistry.RaftTerm.Set(float64(term))
 			}
 		}
 	}()
 	defer close(stopTicking)
-
-	metricRegistry := metrics.NewRegistry()
 	go func() {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.HandlerFor(metricRegistry.Registry, promhttp.HandlerOpts{}))
