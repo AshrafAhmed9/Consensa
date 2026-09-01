@@ -90,6 +90,14 @@ the design decisions and their reasoning, including ones later sessions overturn
   received frame synchronously off the shared connection's one read goroutine (each range
   now has its own inbox and worker). Coalescing multiple ranges' messages into a single
   wire frame remains out of scope.
+- **Learners are wired into the live quorum path, not just modeled.** `Config.Learners`
+  marks peers that replicate but never vote and are never counted toward `quorum()`;
+  `TestCommitNeverAdvancesOnLearnerAcksAlone` proves the actual safety property directly --
+  a leader plus only a learner acknowledging an entry (a literal majority of all nodes) is
+  not enough to commit, since it isn't a majority of real voters. Deliberately scoped
+  smaller than full joint consensus (see `docs/adr/010-learners.md`): additive and opt-in,
+  every existing caller gets byte-identical behavior. Full joint-consensus quorum math
+  (`internal/raft/membership.go`) remains unwired.
 - **Formally verified quorum-intersection and split-invariant properties.** `specs/`
   holds TLA+ models for joint-consensus quorum intersection and recursive range
   splitting, each checked by TLC with a required negative control that must fail.
@@ -126,9 +134,11 @@ Stated plainly rather than left implied by omission: the split-trigger *decision
 for the KV plane (size threshold only, no QPS trigger), but nothing calls it
 automatically and there is no live traffic cutover on either plane; outbound connections
 are now pooled per destination, but multiple
-ranges' messages are still never coalesced into a single wire frame; no joint-consensus
-membership changes wired into the live voting path (the quorum math exists and is
-unit-tested, `internal/raft/membership.go`, but nothing calls it yet); serializable isolation is partially closed (Phase 14 -- both `Store` and `DurableStore`
+ranges' messages are still never coalesced into a single wire frame; learners are wired into
+the live quorum path (`docs/adr/010-learners.md`), but full joint-consensus membership
+changes (dual-majority during a transition) are not -- the quorum math exists and is
+unit-tested, `internal/raft/membership.go`, but nothing calls it yet, and there is no
+live promotion path (adding/removing a learner from a running group without a restart); serializable isolation is partially closed (Phase 14 -- both `Store` and `DurableStore`
 now reject the specific write that completes a reproduced write-skew anomaly,
 conservatively, without full SSI's permissive schedule analysis or read-refresh; see
 `docs/notes/14-serializable.md`); follower reads work end to end at the `DurableRange`
