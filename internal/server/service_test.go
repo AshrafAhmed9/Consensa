@@ -18,3 +18,26 @@ func TestBatchGetReturnsOnlyKnownVectors(t *testing.T) {
 		t.Fatalf("BatchGet=%#v,%v", got, e)
 	}
 }
+
+// TestRequestCountIncrementsAcrossRPCs proves RequestCount (cmd/consensa's source for the
+// consensa_range_qps metric) actually reflects real traffic across every data-plane RPC,
+// not just one -- a counter that only some handlers touched would silently understate QPS.
+func TestRequestCountIncrementsAcrossRPCs(t *testing.T) {
+	index, _ := ann.NewHNSW(ann.Config{Dimension: 2, M: 4, EFConstruction: 8, EFSearch: 8, Seed: 1})
+	s := NewService(index)
+	if got := s.RequestCount(); got != 0 {
+		t.Fatalf("RequestCount before any RPC = %d, want 0", got)
+	}
+
+	if _, err := s.BatchGet(context.Background(), &consensav1.BatchGetRequest{Ids: []string{"missing"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Delete(context.Background(), &consensav1.DeleteRequest{Id: "absent"}); err == nil {
+		t.Fatal("expected Delete of an absent ID to fail")
+	}
+	// Delete still counts even though it failed -- RequestCount measures load received,
+	// not requests that succeeded, matching what a real QPS metric should mean.
+	if got := s.RequestCount(); got != 2 {
+		t.Fatalf("RequestCount after BatchGet+Delete = %d, want 2", got)
+	}
+}

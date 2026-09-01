@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/status"
 	"io"
 	"sync"
+	"sync/atomic"
 )
 
 // Index is the narrow vector mutation/query contract shared by a local and Raft-backed index.
@@ -24,9 +25,10 @@ type Index interface {
 // Service is the public API implementation. Its index can be local or Raft-backed.
 type Service struct {
 	consensav1.UnimplementedConsensaServer
-	mu      sync.RWMutex
-	index   Index
-	vectors map[string]vector.Vector
+	mu           sync.RWMutex
+	index        Index
+	vectors      map[string]vector.Vector
+	requestCount atomic.Uint64
 }
 
 // NewService creates an API service with a configured HNSW index.
@@ -34,8 +36,16 @@ func NewService(index Index) *Service {
 	return &Service{index: index, vectors: map[string]vector.Vector{}}
 }
 
+// RequestCount returns the total number of data-plane requests (Search, Upsert, Delete,
+// BatchGet) this service has handled since it started. It is a raw counter, not a rate --
+// converting it into a QPS gauge means sampling the delta over a time window, which is
+// the caller's job (see cmd/consensa/main.go's metrics tick loop) so this type stays free
+// of a clock dependency it does not otherwise need.
+func (s *Service) RequestCount() uint64 { return s.requestCount.Load() }
+
 // Upsert accepts a streaming ingest batch and rejects malformed vectors before partial indexing.
 func (s *Service) Upsert(stream consensav1.Consensa_UpsertServer) error {
+	s.requestCount.Add(1)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var requests []*consensav1.UpsertRequest
@@ -79,6 +89,7 @@ func (s *Service) Upsert(stream consensav1.Consensa_UpsertServer) error {
 
 // Search streams ordered ANN results so large result sets need not wait for response assembly.
 func (s *Service) Search(r *consensav1.SearchRequest, stream consensav1.Consensa_SearchServer) error {
+	s.requestCount.Add(1)
 	if r.Query == nil || len(r.Query.Values) == 0 || r.K == 0 {
 		return status.Error(codes.InvalidArgument, "query and positive k are required")
 	}
@@ -99,6 +110,7 @@ func (s *Service) Search(r *consensav1.SearchRequest, stream consensav1.Consensa
 // Delete removes a vector and its graph links. Raft-backed deployments call this only after
 // the corresponding replicated deletion mutation commits.
 func (s *Service) Delete(_ context.Context, request *consensav1.DeleteRequest) (*consensav1.DeleteResponse, error) {
+	s.requestCount.Add(1)
 	if request.Id == "" {
 		return nil, status.Error(codes.InvalidArgument, "id is required")
 	}
@@ -113,6 +125,7 @@ func (s *Service) Delete(_ context.Context, request *consensav1.DeleteRequest) (
 
 // BatchGet returns vectors that remain visible in the local single-node index.
 func (s *Service) BatchGet(_ context.Context, r *consensav1.BatchGetRequest) (*consensav1.BatchGetResponse, error) {
+	s.requestCount.Add(1)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := &consensav1.BatchGetResponse{Vectors: map[string]*consensav1.Vector{}}

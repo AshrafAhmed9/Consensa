@@ -90,12 +90,13 @@ func main() {
 				// is temporarily down -- both are ordinary and handled by internal/raft's
 				// own retry-on-next-heartbeat behavior, not something this loop must react to.
 				_ = node.Tick()
-				// RangeQPS and Recall stay at their registered zero value here -- neither
-				// has a real source wired to this loop yet (QPS needs request counting in
-				// server.Service, recall needs a benchmark hook). Reporting them anyway
-				// would be exactly the kind of fabricated-looking metric this project's
-				// own documentation standard argues against; leaving them at zero is
-				// honest about what is and isn't measured, not a placeholder to hide.
+				// Recall stays at its registered zero value here -- it has no real source
+				// wired to this loop yet (it needs a benchmark hook from harness/bench).
+				// Reporting it anyway would be exactly the kind of fabricated-looking
+				// metric this project's own documentation standard argues against; leaving
+				// it at zero is honest about what isn't measured, not a placeholder to
+				// hide. RangeQPS is set separately below, since it's a rate over a window
+				// rather than an instantaneous value like the Raft term.
 				_, term, _ := node.Status()
 				metricRegistry.RaftTerm.Set(float64(term))
 			}
@@ -110,17 +111,41 @@ func main() {
 		}
 	}()
 
-	listener, err := net.Listen("tcp", *grpcListen)
-	if err != nil {
-		log.Fatal(err)
-	}
-	grpcServer := grpc.NewServer()
 	// DurableNode satisfies server.Index directly: Insert/Delete only succeed when this
 	// replica is the current Raft leader (see DurableNode.Insert's doc comment), so a
 	// client that gets a "not leader" error is expected to retry against another node in
 	// --peers -- this binary does not yet forward writes to the leader on a client's
 	// behalf. Reads (Search/Validate) are served locally regardless of leadership.
-	consensav1.RegisterConsensaServer(grpcServer, server.NewService(node))
+	service := server.NewService(node)
+
+	// consensa_range_qps is a rate, and Service.RequestCount is only a raw cumulative
+	// counter (see its own doc comment for why), so this loop samples the delta over a
+	// fixed window itself rather than pushing that responsibility onto Service.
+	stopQPS := make(chan struct{})
+	go func() {
+		const window = time.Second
+		ticker := time.NewTicker(window)
+		defer ticker.Stop()
+		var last uint64
+		for {
+			select {
+			case <-stopQPS:
+				return
+			case <-ticker.C:
+				current := service.RequestCount()
+				metricRegistry.RangeQPS.Set(float64(current-last) / window.Seconds())
+				last = current
+			}
+		}
+	}()
+	defer close(stopQPS)
+
+	listener, err := net.Listen("tcp", *grpcListen)
+	if err != nil {
+		log.Fatal(err)
+	}
+	grpcServer := grpc.NewServer()
+	consensav1.RegisterConsensaServer(grpcServer, service)
 	log.Printf("consensa node %d: raft on %s, gRPC on %s, metrics on http://%s/metrics, data in %s",
 		selfID, selfAddr, *grpcListen, fmt.Sprintf("%s", *metricsListen), *dataDir)
 	log.Fatal(grpcServer.Serve(listener))

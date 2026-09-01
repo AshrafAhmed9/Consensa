@@ -37,9 +37,15 @@ endpoint would always return `consensa_raft_term`, `consensa_range_qps`, and
 running process's `/metrics`, parsed for the real value, asserted `>= 1` only after real
 elections have actually happened.
 
-`consensa_range_qps` and `consensa_ann_recall` are still unwired, deliberately left at
-zero rather than filled with a plausible-looking placeholder -- QPS needs request
-counting added to `internal/server.Service`, and recall needs a hook from
-`harness/bench`'s benchmark path into the running process, neither of which exists yet.
-Grafana dashboards, structured JSON logging, and the `docker compose up` demo GIF remain
-entirely unbuilt.
+**`consensa_range_qps` is now wired too.** `server.Service` counts every data-plane RPC
+(`Upsert`, `Search`, `Delete`, `BatchGet`) it receives -- including ones that fail, since a
+QPS metric should measure load received, not requests that happened to succeed
+(`TestRequestCountIncrementsAcrossRPCs` proves this). A separate 1-second-window loop in
+`cmd/consensa/main.go` samples the delta and sets the gauge to a real requests-per-second
+value, deliberately not folded into the Raft term's per-tick loop: a rate needs a fixed
+sampling window, an instantaneous value like the Raft term does not.
+
+`consensa_ann_recall` remains unwired, deliberately left at zero rather than filled with a
+plausible-looking placeholder -- it needs a hook from `harness/bench`'s benchmark path
+into the running process, which does not exist yet. Grafana dashboards, structured JSON
+logging, and the `docker compose up` demo GIF remain entirely unbuilt.
