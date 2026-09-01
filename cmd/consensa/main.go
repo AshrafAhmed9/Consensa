@@ -7,6 +7,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -106,6 +107,32 @@ func main() {
 	go func() {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.HandlerFor(metricRegistry.Registry, promhttp.HandlerOpts{}))
+		// consensa_ann_recall cannot be computed by this process itself: recall is only
+		// meaningful relative to a labeled dataset and its brute-force ground truth,
+		// neither of which this node has any reason to know about its own accord. This
+		// endpoint accepts a value an external benchmark client already computed against
+		// THIS node's real Search RPC (see harness/bench and
+		// cmd/consensa/main_e2e_test.go's TestConsensaBinaryReportsRealRecallMetric for
+		// the client side) -- the same "push" shape a Prometheus pushgateway uses, chosen
+		// because this node cannot originate the measurement itself.
+		mux.HandleFunc("/report-recall", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			body, err := io.ReadAll(io.LimitReader(r.Body, 64))
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			value, err := strconv.ParseFloat(strings.TrimSpace(string(body)), 64)
+			if err != nil || value < 0 || value > 1 {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			metricRegistry.Recall.Set(value)
+			w.WriteHeader(http.StatusNoContent)
+		})
 		if err := http.ListenAndServe(*metricsListen, mux); err != nil {
 			log.Printf("consensa: metrics server stopped: %v", err)
 		}

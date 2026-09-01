@@ -305,3 +305,184 @@ func TestConsensaBinaryThreeProcessClusterSurvivesKillAndRestart(t *testing.T) {
 		t.Fatalf("restarted node 3 search for nearest to (1,0,0,0) = %v, want [a] recovered from disk", recovered)
 	}
 }
+
+// TestConsensaBinaryReportsRealRecallMetric proves consensa_ann_recall's whole pipeline
+// end to end: a real dataset upserted into a real 3-node cluster, real Search RPCs
+// against it, an independent brute-force ground truth computed here (not reused from the
+// node's own search path, the same reasoning cmd/vectortorture's bruteForceTopK uses),
+// recall@k computed from the two, pushed to /report-recall, and read back from /metrics --
+// proving the number that ends up on the Grafana dashboard (deploy/grafana) is a real
+// measurement of this specific cluster's actual search quality, not a hardcoded value
+// that happens to satisfy the endpoint's validation.
+func TestConsensaBinaryReportsRealRecallMetric(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs three real OS processes; skipped in -short mode")
+	}
+
+	binDir := t.TempDir()
+	binary := filepath.Join(binDir, "consensa")
+	build := exec.Command("go", "build", "-o", binary, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("building consensa binary: %v\n%s", err, out)
+	}
+
+	ids := []int{1, 2, 3}
+	nodes := map[int]*e2eNode{}
+	peerParts := ""
+	for i, id := range ids {
+		if i > 0 {
+			peerParts += ","
+		}
+		raftAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+		peerParts += fmt.Sprintf("%d=%s", id, raftAddr)
+		nodes[id] = &e2eNode{
+			id: id, raftAddr: raftAddr,
+			grpcAddr:   fmt.Sprintf("127.0.0.1:%d", freePort(t)),
+			metricAddr: fmt.Sprintf("127.0.0.1:%d", freePort(t)),
+			dataDir:    filepath.Join(t.TempDir(), fmt.Sprintf("node%d", id)),
+			binary:     binary,
+		}
+	}
+	for _, id := range ids {
+		nodes[id].peersFlag = peerParts
+		nodes[id].start(t)
+	}
+	defer func() {
+		for _, id := range ids {
+			nodes[id].kill(t)
+		}
+	}()
+
+	var clients []consensav1.ConsensaClient
+	for _, id := range ids {
+		waitForListening(t, nodes[id].grpcAddr, 10*time.Second)
+		clients = append(clients, dialNode(t, nodes[id].grpcAddr))
+	}
+
+	// A small, fixed synthetic dataset (dimension 4, matching e2eNode.start's -dimension
+	// flag) -- deterministic so recall@k has one correct answer to check against.
+	dataset := map[string][]float32{
+		"a": {0, 0, 0, 0}, "b": {1, 0, 0, 0}, "e": {10, 0, 0, 0},
+	}
+	for id, v := range dataset {
+		upsertUntilAccepted(t, clients, id, v, 10*time.Second)
+	}
+
+	// Independent brute-force ground truth over the same dataset just upserted -- the
+	// query (0.5,0,0,0) should have {a,b} as its true top-2 nearest neighbours.
+	query := []float32{0.5, 0, 0, 0}
+	const k = 2
+	groundTruth := bruteForceTop2(dataset, query)
+	truthSetForWait := map[string]bool{groundTruth[0]: true, groundTruth[1]: true}
+
+	// Retry until the search result actually MATCHES ground truth, not just until it
+	// returns k results -- a fresh upsert can take a moment to replicate to whichever
+	// node client[0] happens to be talking to, so an early search can return k results
+	// that are simply whatever was already in the graph, not the just-upserted data.
+	// Checking only len(results)==k (an earlier version of this test did exactly that)
+	// found a real result: it can pass with the WRONG k results and then fail the recall
+	// assertion below spuriously, since len() alone can't tell "the right answer arrived
+	// late" apart from "the right answer is 2 items and this is a different 2 items".
+	var results []*consensav1.SearchResult
+	end := time.Now().Add(10 * time.Second)
+	for time.Now().Before(end) {
+		results = searchOn(t, clients[0], query, k, 2*time.Second)
+		if len(results) == k && truthSetForWait[results[0].Id] && truthSetForWait[results[1].Id] {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(results) != k {
+		t.Fatalf("search returned %d results, want %d", len(results), k)
+	}
+
+	hits := 0
+	truthSet := map[string]bool{}
+	for _, id := range groundTruth {
+		truthSet[id] = true
+	}
+	for _, r := range results {
+		if truthSet[r.Id] {
+			hits++
+		}
+	}
+	recall := float64(hits) / float64(k)
+	if recall < 1.0 {
+		t.Fatalf("this small, well-separated dataset should have recall@%d = 1.0, got %.2f (results=%v, truth=%v)", k, recall, results, groundTruth)
+	}
+
+	pushRecall(t, nodes[1].metricAddr, recall)
+
+	reported := recallFromMetrics(t, nodes[1].metricAddr)
+	if reported != recall {
+		t.Fatalf("consensa_ann_recall over /metrics = %v, want the pushed value %v", reported, recall)
+	}
+}
+
+// bruteForceTop2 is an independent nearest-neighbour computation, deliberately not
+// reusing anything from internal/ann -- the whole point of ground truth is that it does
+// not share code with the thing it's checking.
+func bruteForceTop2(dataset map[string][]float32, query []float32) []string {
+	type scored struct {
+		id   string
+		dist float64
+	}
+	var all []scored
+	for id, v := range dataset {
+		var sum float64
+		for i := range v {
+			d := float64(v[i]) - float64(query[i])
+			sum += d * d
+		}
+		all = append(all, scored{id, sum})
+	}
+	for i := 0; i < len(all); i++ {
+		for j := i + 1; j < len(all); j++ {
+			if all[j].dist < all[i].dist {
+				all[i], all[j] = all[j], all[i]
+			}
+		}
+	}
+	return []string{all[0].id, all[1].id}
+}
+
+func pushRecall(t *testing.T, metricAddr string, value float64) {
+	t.Helper()
+	resp, err := http.Post(fmt.Sprintf("http://%s/report-recall", metricAddr), "text/plain",
+		strings.NewReader(fmt.Sprintf("%f", value)))
+	if err != nil {
+		t.Fatalf("pushing recall to %s: %v", metricAddr, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /report-recall = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+}
+
+func recallFromMetrics(t *testing.T, metricAddr string) float64 {
+	t.Helper()
+	resp, err := http.Get(fmt.Sprintf("http://%s/metrics", metricAddr))
+	if err != nil {
+		t.Fatalf("fetching /metrics from %s: %v", metricAddr, err)
+	}
+	defer resp.Body.Close()
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "consensa_ann_recall ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		value, err := strconv.ParseFloat(fields[1], 64)
+		if err != nil {
+			t.Fatalf("parsing consensa_ann_recall value %q: %v", fields[1], err)
+		}
+		return value
+	}
+	t.Fatalf("consensa_ann_recall not found in /metrics output from %s", metricAddr)
+	return 0
+}

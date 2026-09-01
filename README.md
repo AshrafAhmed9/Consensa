@@ -72,10 +72,14 @@ the design decisions and their reasoning, including ones later sessions overturn
 - **Formally verified quorum-intersection and split-invariant properties.** `specs/`
   holds TLA+ models for joint-consensus quorum intersection and recursive range
   splitting, each checked by TLC with a required negative control that must fail.
-- **Real metrics.** `consensa_raft_term` and `consensa_range_qps` report real, live
-  values from a running process, scraped by a real Prometheus and rendered on a real,
-  auto-provisioned Grafana dashboard -- verified against a live Docker cluster, not read
-  from source.
+- **Real metrics, all three.** `consensa_raft_term`, `consensa_range_qps`, and
+  `consensa_ann_recall` all report real, live values from a running process. The first
+  two are self-measured; recall is pushed by an external benchmark client that computed
+  it against that node's real `Search` RPC and an independent brute-force ground truth
+  (a node cannot compute its own recall -- it has no reason to know the labeled dataset
+  or ground truth). All three are scraped by a real Prometheus and rendered on a real,
+  auto-provisioned Grafana dashboard -- verified against a live Docker cluster and a live
+  3-process cluster, not read from source.
 
 ## What is explicitly not done yet
 
@@ -85,8 +89,8 @@ range still dials its own outbound connections); no joint-consensus membership c
 wired into the live voting path (the quorum math exists and is unit-tested,
 `internal/raft/membership.go`, but nothing calls it yet); `ConsensaKV.TransactionalPut`
 is proven against real `DurableRange` groups by its own dedicated test but not wired into
-`cmd/consensa`, which still only runs the vector plane; no recall metric wired to a
-running process; no serializable isolation (Phase 14 --
-snapshot isolation's write-skew gap is reproduced as a test, not yet closed). ANN search
+`cmd/consensa`, which still only runs the vector plane; no serializable isolation
+(Phase 14 -- snapshot isolation's write-skew gap is reproduced as a test, not yet
+closed). ANN search
 is approximate by construction and is never described as linearizable; only the
 register/KV plane makes that claim, and only where a test backs it.

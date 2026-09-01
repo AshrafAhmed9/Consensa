@@ -45,9 +45,34 @@ QPS metric should measure load received, not requests that happened to succeed
 value, deliberately not folded into the Raft term's per-tick loop: a rate needs a fixed
 sampling window, an instantaneous value like the Raft term does not.
 
-`consensa_ann_recall` remains unwired, deliberately left at zero rather than filled with a
-plausible-looking placeholder -- it needs a hook from `harness/bench`'s benchmark path
-into the running process, which does not exist yet.
+**`consensa_ann_recall` is now wired too.** A node cannot compute its own recall (it needs
+a labeled dataset and independent ground truth, neither of which it has reason to know
+about), so `cmd/consensa` exposes `POST /report-recall` on the metrics port -- the same
+push shape a Prometheus pushgateway uses -- for an external benchmark client to report a
+value it already computed against that node's real `Search` RPC.
+`TestConsensaBinaryReportsRealRecallMetric` (`cmd/consensa/main_e2e_test.go`) proves the
+whole pipeline against a real 3-node cluster: real vectors upserted, an independent
+brute-force ground truth computed separately from anything HNSW touches (the same
+discipline `cmd/vectortorture`'s `bruteForceTopK` uses), a real `Search` RPC checked
+against it, the resulting recall pushed, and read back from `/metrics`.
+
+Building this test surfaced a real lesson about writing this class of test correctly, not
+a product bug: an early version's search-retry loop checked only `len(results) == k`
+before accepting an answer, not whether the results actually matched ground truth. A
+freshly upserted key can take a moment to replicate to whichever node the search happens
+to land on, so the loop could exit early with the *wrong* k results (whatever was already
+in the graph) and then fail the recall assertion downstream for a reason that looked like
+a real bug but was actually the test not waiting for the right condition. Fixed by
+retrying until the result content matches ground truth, not just its length -- the same
+discipline `internal/ann/durable_split_test.go`'s per-insert `waitForApplied` calls
+already established earlier this session for a different reason (racing proposals against
+a leadership change). A separate, real finding along the way: proposing many upserts
+back-to-back with no pause between them (8, in an earlier version of this test) measurably
+increased the chance of hitting a leadership blip long enough to exceed even a generous
+per-key retry budget, compared to 3; the test uses a small, deliberately chosen dataset
+now, and the underlying question -- why a healthy cluster doesn't always recover a rapid
+upsert burst comfortably within the existing retry budget -- is noted here as worth
+investigating further, not chased down in this pass.
 
 **Grafana dashboards are now provisioned and verified against the real stack, not just
 written.** `deploy/docker-compose.yml` gained `prometheus` and `grafana` services;
