@@ -91,10 +91,14 @@ func (h *Host) driveLocked() error {
 	if err := h.persister.Persist(ready); err != nil {
 		return err
 	}
+	// A send failure to one peer must not block progress toward the others: Raft is
+	// designed to tolerate a minority of unreachable nodes, and any message dropped here
+	// gets naturally retried on the next heartbeat once the node is Ready() again. Returning
+	// early on the first dial failure -- the previous behavior -- would let a single dead
+	// peer wedge replication to a live majority too, since Advance() below would never run
+	// and the same stale Ready (including the doomed message) would be re-emitted forever.
 	for _, message := range ready.Messages {
-		if err := h.transport.Send(message); err != nil {
-			return err
-		}
+		_ = h.transport.Send(message)
 	}
 	for _, entry := range ready.CommittedEntries {
 		if err := h.apply(entry); err != nil {
