@@ -158,3 +158,64 @@ func TestLeaderPrefersHighestTermDuringSustainedIsolation(t *testing.T) {
 		}
 	}
 }
+
+// TestAsymmetricPartitionDisruptsHealthyLeader documents a real, unfixed gap: pre-vote
+// (Ongaro thesis §9.6) stops a RECONNECTING node's inflated term from disrupting a
+// healthy cluster, but does nothing for a node that is PERSISTENTLY cut off from the
+// leader alone while still fully connected to every other follower. handleVote and
+// handlePreVote (election.go) grant a vote based only on log freshness -- neither checks
+// whether the responder currently has a healthy, reachable leader (etcd calls this check
+// CheckQuorum; this implementation does not have it). So a follower those OTHER
+// followers can still reach wins real elections against them and repeatedly displaces
+// the actual leader, purely because they have no way to know it's still alive.
+//
+// This is why the torture harness could not distinguish a correctly-implemented
+// pre-vote from a deliberately weakened one (docs/notes/06-torture.md,
+// docs/adr/007-prevote-does-not-cover-persistent-asymmetric-partitions.md): every fault
+// it can generate is a full bidirectional isolation, which can never produce this
+// scenario, and this scenario doesn't distinguish the two implementations anyway --
+// proven below by running it against the real, unmodified election path.
+func TestAsymmetricPartitionDisruptsHealthyLeader(t *testing.T) {
+	c, err := NewCluster([]NodeID{1, 2, 3, 4, 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := c.Tick(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leader, ok := c.Leader()
+	if !ok {
+		t.Fatal("no leader elected")
+	}
+	var disruptor NodeID
+	for _, id := range []NodeID{1, 2, 3, 4, 5} {
+		if id != leader {
+			disruptor = id
+			break
+		}
+	}
+
+	// Cut only the leader<->disruptor link. Every other pair, including
+	// disruptor<->every-other-follower, stays fully connected -- this is what makes it
+	// asymmetric rather than the harness's full isolation.
+	asymmetric := func(m Message) bool {
+		cutLink := (m.From == disruptor && m.To == leader) || (m.From == leader && m.To == disruptor)
+		return !cutLink
+	}
+
+	sawDisruption := false
+	for i := 0; i < 15; i++ {
+		if err := c.TickFiltered(asymmetric); err != nil {
+			t.Fatal(err)
+		}
+		if current, ok := c.Leader(); ok && current == disruptor {
+			sawDisruption = true
+			break
+		}
+	}
+	if !sawDisruption {
+		t.Fatal("expected the disruptor to eventually win an election against the leader-reachable followers, proving the asymmetric-partition gap is real")
+	}
+}

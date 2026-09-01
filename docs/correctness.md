@@ -35,18 +35,30 @@ widely shared method (`ann.ReplicatedIndex`, `kv.multiraft`, and this harness al
 `Cluster.Leader()`), not a narrow harness-only patch. With it fixed, the harness runs
 clean across 200+ seeds against the correct implementation.
 
-**Whether the harness can catch a deliberately injected safety bug (this phase's own
-DoD) is still open, now for a more precise reason than before.** Two bugs were tried
-again post-fix (weakening Figure-8's commit rule; disabling pre-vote's freshness check),
-500+ seeds combined, and neither was caught. Traced to a mechanism, not a vague
-insufficiency: `Node.Tick()` never attempts an election for a node that already believes
-it is leader, so isolating the *leader* — which is what a uniformly random fault target
-does roughly `1/nodes` of the time, and is what happened at the seed that misleadingly
-"passed" before the `Leader()` fix was found — never exercises either weakened check at
-all. Exercising them needs the isolated node to specifically be a non-leader follower
-that keeps re-campaigning while cut off and then reconnects at an inflated term while a
-healthy leader still stands — a scripted sequence, not a property of window length alone.
-`docs/notes/06-torture.md` has the full trace-level account.
+**The Figure-8 half of this phase's DoD ("harness catches a deliberately injected safety
+bug") remains open** — weakening the commit rule and running 500+ seeds under sustained
+isolation windows did not catch it. Traced to a mechanism: `Node.Tick()` never attempts
+an election for a node that already believes it is leader, so a uniformly random fault
+target only exercises election machinery at all when it happens to isolate a follower,
+and a scripted schedule (mirroring how `TestFigure8CommitRule` already reproduces the
+exact log/match state directly) is the credible next step, not more seeds.
+
+**The pre-vote half of that DoD is retired, not achieved, and the reason is a real
+finding, not a harness shortcoming.** Testing an *asymmetric* partition — one follower
+cut off from the leader only, fully connected to every other follower — shows the
+disruptor wins real elections and repeatedly displaces the healthy leader **even with
+pre-vote correctly implemented**. This implementation's pre-vote, like the base Raft
+paper, has no notion of "reject a vote if I currently have a healthy, reachable leader"
+(etcd calls this `CheckQuorum`; it is not implemented here) — it only stops a
+*reconnecting* node's inflated term from causing harm, which is a different bug class
+from a *persistently* asymmetric partition. No fault schedule the torture harness can
+generate (full bidirectional isolation, of any duration) produces this scenario, and the
+scenario that does produce it doesn't distinguish a weakened pre-vote from a correct one
+anyway — so this was never achievable by hardening the fault model, seeded or not.
+`docs/adr/007-prevote-does-not-cover-persistent-asymmetric-partitions.md` has the full
+account and the decision to leave it unfixed for now; the gap is proven permanently by
+`TestAsymmetricPartitionDisruptsHealthyLeader` in `internal/raft/cluster_test.go`, not
+just described. `docs/notes/06-torture.md` has the trace-level path that led here.
 
 Two things beyond unit tests are now proven, both by dedicated integration tests:
 

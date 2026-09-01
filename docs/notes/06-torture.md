@@ -97,11 +97,27 @@ that sequence -- sustained windows were necessary to get real elections happenin
 (and they do now, correctly, which the `Leader()` fix confirms), but they are not
 sufficient to exercise this specific class of election-safety bug.
 
-**The precise next step, now that the vaguer "single-round" theory is retired:** the
-schedule generator needs to target the current *non-leader* role specifically (which
-requires either querying live cluster state when generating faults -- a real change to
-the "pure function of the seed" design -- or a purpose-built adversarial schedule that
-scripts a known-follower isolation-then-reconnect sequence, closer to how
-`TestFigure8CommitRule`'s unit test scripts exact log/match state directly). That is a
-non-trivial harness design decision, not a parameter tweak, which is why it remains open
-rather than attempted in this pass.
+**Resolved, and it changes the conclusion.** The "isolate a follower, then reconnect
+while a healthy leader stands" theory above was still incomplete. Testing an
+*asymmetric* partition -- one follower cut off from the leader only, fully connected to
+every other follower -- shows the disruptor wins real elections and repeatedly displaces
+the healthy leader **even with pre-vote correctly implemented, unweakened**. Full
+account and the scripted proof: `docs/adr/007-prevote-does-not-cover-persistent-
+asymmetric-partitions.md` and `TestAsymmetricPartitionDisruptsHealthyLeader` in
+`internal/raft/cluster_test.go`.
+
+That means the DoD item ("harness catches deliberately weakened pre-vote") was
+unreachable by construction, for a reason deeper than fault-schedule design: the bug
+class pre-vote actually guards against (a *reconnecting* node's inflated term) and the
+bug class this session kept trying to trigger (a *persistently* asymmetric partition)
+are different, and no amount of harder isolation schedules collapses that difference --
+this implementation's pre-vote, like the base Raft paper, has no notion of "reject a
+vote if I currently have a healthy leader" (etcd calls this `CheckQuorum`; it isn't
+implemented here). **This DoD item is retired, not achieved** -- see ADR-007 for why a
+scripted deterministic test, not the seeded torture harness, is the right tool for this
+specific protocol property, matching how `TestFigure8CommitRule` already works.
+
+The Figure-8 DoD item remains genuinely open (unlike pre-vote, nothing here rules it out
+as structurally unreachable) -- a scripted, adversarial schedule targeting the exact
+log/match-index pattern the unit test already exercises, the same way this session's
+pre-vote work did, is the concrete next step if it's worth pursuing further.
