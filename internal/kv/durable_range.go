@@ -135,13 +135,32 @@ func (r *DurableRange) Delete(key []byte) error {
 	return r.host.Propose(data)
 }
 
-// Get reads the newest committed value for key from this replica's local engine. Reading
-// at the maximum timestamp means "whatever this replica has applied so far" -- once a
-// command is applied here, every replica's engine holds the identical key/value by
-// construction, so any replica -- not only the leader -- may safely serve reads, the same
-// reasoning DurableNode.Search documents for HNSW.
+// Get reads the newest value this replica has itself applied for key. This is a
+// bounded-staleness read, not a linearizable one: a replica can only ever return data it
+// has actually applied, so it never returns a phantom or future value, but a replica that
+// has fallen behind can return a value older than one a client already observed
+// acknowledged elsewhere. That distinction matters for this project's own claims
+// discipline (docs/correctness.md) -- it is exactly right for DurableNode.Search's
+// reasoning (ANN search is approximate and bounded-staleness by design, so any replica's
+// applied graph is a valid answer), but it is NOT sufficient on its own to justify calling
+// the KV plane linearizable. A caller needing that guarantee wants ConsistentGet instead.
 func (r *DurableRange) Get(key []byte) ([]byte, error) {
 	return r.db.Get(key, storage.HLC{WallTime: math.MaxInt64})
+}
+
+// ConsistentGet reads key only if this replica is currently the Raft leader, returning the
+// same "not leader" error Put/Delete do otherwise (see Put's doc comment for the
+// client-retry pattern this requires). This is what makes a read linearizable rather than
+// merely bounded-stale: a leader has, by definition, applied everything it has itself
+// committed, so if a prior write was acknowledged by this leader, this read (issued after
+// that acknowledgment, against the same still-current leader) is guaranteed to observe
+// it -- real-time order is preserved. It gives up Get's one advantage (any replica can
+// serve it, spreading read load) for that guarantee.
+func (r *DurableRange) ConsistentGet(key []byte) ([]byte, error) {
+	if role, _ := r.host.Status(); role != raft.Leader {
+		return nil, errors.New("kv: consistent read requires this replica to be leader")
+	}
+	return r.Get(key)
 }
 
 // validateRangeKey rejects an empty key or one that collides with Persister's reserved

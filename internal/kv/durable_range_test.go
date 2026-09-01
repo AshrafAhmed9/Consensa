@@ -280,3 +280,66 @@ func TestDurableRangeDeleteIsDurable(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// TestConsistentGetRequiresLeadership proves ConsistentGet actually enforces the
+// leader-only contract its doc comment claims -- the property that makes it linearizable
+// where Get is only bounded-stale. A follower must reject it exactly like Put/Delete
+// reject a non-leader proposal; the leader must serve it once the write it's reading is
+// actually visible there.
+func TestConsistentGetRequiresLeadership(t *testing.T) {
+	ids := []raft.NodeID{1, 2, 3}
+	group := startDurableRangeGroup(t, 1, nil, nil, ids)
+	defer group.closeAll(t)
+
+	var leader *DurableRange
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && leader == nil {
+		for _, r := range group.list() {
+			if err := r.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			if role, _ := r.Status(); role == raft.Leader {
+				leader = r
+			}
+		}
+	}
+	if leader == nil {
+		t.Fatal("group never elected a leader")
+	}
+
+	deadline = time.Now().Add(3 * time.Second)
+	var putErr error
+	for time.Now().Before(deadline) {
+		if putErr = leader.Put([]byte("k"), []byte("v")); putErr == nil {
+			break
+		}
+	}
+	if putErr != nil {
+		t.Fatalf("leader never accepted the put: %v", putErr)
+	}
+
+	deadline = time.Now().Add(3 * time.Second)
+	var got []byte
+	var getErr error
+	for time.Now().Before(deadline) {
+		if got, getErr = leader.ConsistentGet([]byte("k")); getErr == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if getErr != nil || string(got) != "v" {
+		t.Fatalf("ConsistentGet on the leader = %q, %v, want \"v\", nil", got, getErr)
+	}
+
+	for _, r := range group.list() {
+		if r == leader {
+			continue
+		}
+		if role, _ := r.Status(); role == raft.Leader {
+			continue // an election could have moved leadership mid-test; skip, don't fail.
+		}
+		if _, err := r.ConsistentGet([]byte("k")); err == nil {
+			t.Fatalf("ConsistentGet on a non-leader replica succeeded; it must reject like Put does")
+		}
+	}
+}
