@@ -239,7 +239,7 @@ func (h *Host) driveLocked() error {
 		_ = h.transport.Send(message)
 	}
 	for _, entry := range ready.CommittedEntries {
-		if string(entry.Data) != string(readBarrierCommand) && !isConfChangeData(entry.Data) {
+		if string(entry.Data) != string(readBarrierCommand) && !isRaftInternalData(entry.Data) {
 			if err := h.apply(entry); err != nil {
 				return err
 			}

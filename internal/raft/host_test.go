@@ -71,6 +71,11 @@ func TestHostDoesNotApplyInternalConfChangeEntries(t *testing.T) {
 	if err := state.ProposeConfChange([]NodeID{1}, nil); err != nil {
 		t.Fatal(err)
 	}
+	noop := Entry{Index: state.log.lastIndex() + 1, Term: state.term, Data: append([]byte(nil), jointLeaderNoop...)}
+	if err := state.log.append([]Entry{noop}); err != nil {
+		t.Fatal(err)
+	}
+	state.unstable = append(state.unstable, noop)
 	state.log.committed = state.log.lastIndex()
 	applied := 0
 	h := &Host{node: state, persister: NewPersister(db), transport: discardTransport{}, progress: make(chan struct{}), apply: func(Entry) error {
@@ -81,7 +86,7 @@ func TestHostDoesNotApplyInternalConfChangeEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	if applied != 0 {
-		t.Fatalf("application state machine received %d internal config entries", applied)
+		t.Fatalf("application state machine received %d internal Raft entries", applied)
 	}
 }
 

@@ -14,6 +14,12 @@ import (
 // argument kv.reservedKeyPrefix already makes for its own "raft/" namespace one layer up.
 var confChangePrefix = []byte("\x00raft/confchange\x00")
 
+// jointLeaderNoop is a Raft-internal current-term entry a newly elected leader appends
+// while a joint configuration is in progress. Raft's current-term commit rule otherwise
+// prevents it from committing an inherited joint entry until an unrelated client write
+// happens to arrive, leaving a leader-crash recovery transition needlessly stuck.
+var jointLeaderNoop = []byte("\x00raft/joint-leader-noop/v1\x00")
+
 // confChangeEntry is the wire encoding of one membership transition step, applied the
 // moment it is APPENDED to a node's own log -- not once committed. This is the specific,
 // easy-to-get-wrong rule the joint-consensus algorithm depends on (Raft §6 / Ongaro's
@@ -58,6 +64,10 @@ func decodeConfChange(data []byte) (confChangeEntry, bool) {
 // itself and an application decoder (for example the ANN mutation decoder) has no valid
 // interpretation for them.
 func isConfChangeData(data []byte) bool { return bytes.HasPrefix(data, confChangePrefix) }
+
+func isRaftInternalData(data []byte) bool {
+	return isConfChangeData(data) || bytes.Equal(data, jointLeaderNoop)
+}
 
 func membershipFromConfChange(c confChangeEntry) Membership {
 	m := Membership{Old: map[NodeID]bool{}, New: map[NodeID]bool{}, Joint: c.Joint}

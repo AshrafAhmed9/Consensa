@@ -272,6 +272,48 @@ func TestJointConfigCannotCommitAcrossANewConfigPartition(t *testing.T) {
 	}
 }
 
+// TestLeaderCrashDuringJointPhaseRecoversSafely covers the failure window Phase 11 is
+// designed for. The old leader sends (but cannot commit) C_old,new, then crashes. The
+// survivors that received it must elect using both quorums, commit it under that same
+// rule, and finish the transition without the failed leader.
+func TestLeaderCrashDuringJointPhaseRecoversSafely(t *testing.T) {
+	ids := []NodeID{1, 2, 3, 4, 5}
+	ns := newConfChangeGroup(t, ids, []NodeID{1, 2, 3})
+	all := nodesAsInterface(ns)
+	for i := 0; i < 3; i++ {
+		ns[1].Tick()
+	}
+	deliver(all)
+	if ns[1].role != Leader {
+		t.Fatal("node 1 did not become leader")
+	}
+	if err := ns[1].ProposeConfChange(ids, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Let nodes 2, 3, and 4 append the joint entry, but lose every acknowledgement so
+	// node 1 cannot commit it before it crashes.
+	deliverConfChangeFiltered(all, func(m Message) bool {
+		return m.Type == MsgAppend && m.From == 1 && (m.To == 2 || m.To == 3 || m.To == 4)
+	})
+	if ns[1].log.committed != 0 || !ns[2].membership.Joint || !ns[3].membership.Joint || !ns[4].membership.Joint {
+		t.Fatal("test setup failed to create an uncommitted joint entry on surviving voters")
+	}
+
+	// Node 1 has crashed. Nodes 2, 3, and 4 alone have exactly the two intersecting
+	// majorities required by Old={1,2,3} and New={1,2,3,4,5}.
+	survivors := map[NodeID]Node{2: ns[2], 3: ns[3], 4: ns[4], 5: ns[5]}
+	for i := 0; i < 3; i++ {
+		ns[2].Tick()
+	}
+	deliver(survivors)
+	if ns[2].role != Leader {
+		t.Fatalf("node 2 did not win a dual-majority election after leader crash: role=%v", ns[2].role)
+	}
+	if ns[2].membership.Joint || ns[2].log.committed < 2 {
+		t.Fatalf("replacement leader did not commit and finalize transition: membership=%#v committed=%d", ns[2].membership, ns[2].log.committed)
+	}
+}
+
 // TestUncommittedConfChangeIsForgottenWhenOverwritten covers the leader-change conflict
 // path: membership is effective on append, but an uncommitted config entry that a later
 // leader overwrites must disappear from the follower's quorum state immediately.

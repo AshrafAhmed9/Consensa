@@ -222,6 +222,14 @@ func (n *node) becomeLeader() {
 	for _, p := range n.peers {
 		n.next[p] = n.log.lastIndex() + 1
 	}
+	// A joint entry inherited from a crashed leader can be from an older term. The Raft
+	// current-term commit rule correctly refuses to commit it on acknowledgements alone;
+	// append an internal no-op now so the new leader can establish a current-term commit
+	// under the dual-majority rule without waiting for an unrelated client proposal.
+	if n.membership.Joint {
+		_ = n.proposeInternal(append([]byte(nil), jointLeaderNoop...))
+		return
+	}
 	n.broadcastAppend()
 }
 func (n *node) broadcastAppend() {
