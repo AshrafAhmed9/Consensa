@@ -39,8 +39,14 @@ func NewStore() *Store {
 
 // PutRecord writes this participant's local copy of a transaction record. Only the anchor
 // is authoritative for a final decision; other copies are retained so resolver progress is
-// observable and restart tests can inspect their local state.
-func (s *Store) PutRecord(record Record) { s.records[record.ID] = record }
+// observable and restart tests can inspect their local state. The error return exists to
+// satisfy Participant -- an in-memory map write cannot fail -- so a Raft-backed
+// implementation (DurableStore) can report a real proposal failure through the identical
+// interface.
+func (s *Store) PutRecord(record Record) error {
+	s.records[record.ID] = record
+	return nil
+}
 
 // Record returns a copy of a transaction record, if known.
 func (s *Store) Record(id string) (Record, bool) {
@@ -58,8 +64,8 @@ func (s *Store) WriteIntent(intent Intent) error {
 }
 
 // Resolve applies or discards all intents matching a transaction's final decision.
-func (s *Store) Resolve(record Record) {
-	s.PutRecord(record)
+func (s *Store) Resolve(record Record) error {
+	_ = s.PutRecord(record)
 	for key, intent := range s.intents {
 		if intent.TxnID != record.ID {
 			continue
@@ -69,6 +75,7 @@ func (s *Store) Resolve(record Record) {
 		}
 		delete(s.intents, key)
 	}
+	return nil
 }
 
 // Get reads a committed value; a pending foreign intent is reported rather than ignored.

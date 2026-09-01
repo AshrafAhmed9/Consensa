@@ -22,6 +22,24 @@ This is snapshot isolation: it keeps intent resolution explicit and testable, wh
 
 ## What can fail?
 
-The in-memory coordinator is a model until its decisions are Raft persisted. A crash in a
-real system requires any participant to resolve abandoned intents from the record; the
-explicit prepare/commit/resolve boundary is present so that recovery path is testable.
+**Update: the coordinator's decisions are now Raft-persisted, not just modeled.**
+`Coordinator` was refactored to depend on a `Participant` interface instead of the
+concrete in-memory `Store`, and `DurableStore` (`internal/txn/durable_store.go`)
+implements it by proposing every record and intent through a real `kv.DurableRange` --
+the identical 2PC logic in `coordinator.go`, unmodified, now runs over durable, replicated
+storage. `TestCoordinatorCommitsAcrossRealRaftRanges` proves a transaction committing
+across two genuinely separate 3-node Raft groups; `TestDurableStoreRecordSurvivesRestart`
+proves a transaction record and its resolved value survive a real node restart, recovered
+purely from that node's own Raft log. See `docs/adr/008-wire-txn-onto-durable-ranges.md`
+for the full account, including a real gap this wiring surfaced (`rangeClient.Put`
+returns once locally appended, not once committed, which the coordinator's protocol logic
+implicitly assumed would already be visible -- closed with a confirm-on-write helper, not
+by weakening the coordinator's contract).
+
+Two things this phase does NOT yet cover, stated plainly: no client-facing RPC
+(`internal/server`) drives `Coordinator` yet -- `DurableStore` is proven reachable and
+correct, but nothing routes an incoming multi-range write request to it automatically,
+and `internal/kv.Router` doesn't know how to resolve a transaction's participants for a
+caller the way today's tests construct them by hand. `WriteIntent`'s conflict check also
+remains non-atomic with its own bookkeeping update under concurrent writers to the same
+key, for the same reason `kv.DurableRange` has no conditional Put to build a real fix on.

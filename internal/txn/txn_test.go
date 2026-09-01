@@ -18,7 +18,7 @@ func TestHLCObservePreservesCausality(t *testing.T) {
 func TestCoordinatorCommitsAcrossParticipants(t *testing.T) {
 	clock := NewClock(time.Now)
 	a, b := NewStore(), NewStore()
-	e := NewCoordinator(clock).Commit("t1", map[*Store][]Intent{a: {{Key: []byte("a"), Value: []byte("1")}}, b: {{Key: []byte("b"), Value: []byte("2")}}})
+	e := NewCoordinator(clock).Commit("t1", map[Participant][]Intent{a: {{Key: []byte("a"), Value: []byte("1")}}, b: {{Key: []byte("b"), Value: []byte("2")}}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -38,7 +38,7 @@ func TestCoordinatorAbortsPartiallyPreparedParticipant(t *testing.T) {
 	if err := store.WriteIntent(Intent{Key: []byte("conflict"), TxnID: "other"}); err != nil {
 		t.Fatal(err)
 	}
-	err := NewCoordinator(clock).Commit("t1", map[*Store][]Intent{store: {{Key: []byte("clean"), Value: []byte("1")}, {Key: []byte("conflict"), Value: []byte("2")}}})
+	err := NewCoordinator(clock).Commit("t1", map[Participant][]Intent{store: {{Key: []byte("clean"), Value: []byte("1")}, {Key: []byte("conflict"), Value: []byte("2")}}})
 	if err == nil {
 		t.Fatal("conflicting transaction committed")
 	}
