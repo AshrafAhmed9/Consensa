@@ -75,6 +75,12 @@ the design decisions and their reasoning, including ones later sessions overturn
 - **Formally verified quorum-intersection and split-invariant properties.** `specs/`
   holds TLA+ models for joint-consensus quorum intersection and recursive range
   splitting, each checked by TLC with a required negative control that must fail.
+- **Lease grants are real, Raft-replicated state.** `DurableRange.GrantLease` proposes a
+  lease through the same replicated command log `Put`/`Delete` use; every replica in a
+  real 3-node group converges on the identical holder and interval, checked against
+  `lease.go`'s clock-bounded validity logic. Closed-timestamp advancement and an actual
+  follower-read RPC path are not built on top of it yet -- see
+  `docs/notes/09-leases.md`.
 - **Real metrics, all three.** `consensa_raft_term`, `consensa_range_qps`, and
   `consensa_ann_recall` all report real, live values from a running process. The first
   two are self-measured; recall is pushed by an external benchmark client that computed

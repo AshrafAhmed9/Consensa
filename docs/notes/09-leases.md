@@ -61,3 +61,22 @@ by definition, applied everything it has itself committed, a read against the sa
 leader that acknowledged an earlier write is guaranteed to observe it.
 `TestConsistentGetRequiresLeadership` (`internal/kv/durable_range_test.go`) proves both
 halves: a follower rejects it, the leader serves the value it just committed.
+
+**Update: lease grants are now real, Raft-replicated state, not just a tested model.**
+`DurableRange.GrantLease` proposes a lease-grant command through the same
+Raft-replicated wire format `Put`/`Delete` use (`multiraft.go`'s `rangeCommand`, extended
+with `LeaseHolder`/`LeaseStart`/`LeaseExpiration`), so a grant only takes effect once
+every replica has actually applied it, not merely accepted locally on the leader.
+`DurableRange.CurrentLease()` exposes each replica's own applied result.
+`TestGrantLeaseReplicatesToEveryReplica` proves convergence across a real 3-node group
+and that `FollowerReadAllowedWithOffset` correctly accepts a read inside the lease
+interval and rejects one after expiry, against the replicated lease rather than the
+in-memory model alone.
+
+**What is still not built, stated plainly:** there is still no closed-timestamp
+advancement (nothing periodically proposes an updated `ClosedTimestamp` as the leader
+keeps committing), and no actual follower-read RPC path serves a client from anything but
+the leader -- `GrantLease`/`CurrentLease` close lease *replication* specifically, not the
+whole read-path ladder. `Host.AppliedIndex()` still does not exist as a public accessor,
+which closed-timestamp advancement would need to know how far a given replica has
+actually caught up.
