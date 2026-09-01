@@ -52,6 +52,14 @@ const (
 // proven against the synchronous in-memory Store and genuinely needs "this call's effect
 // is visible to the next call" to hold, which a bare Put does not guarantee but
 // putAndConfirm does, at the cost of blocking until the write is locally readable.
+//
+// Another real, stated gap: Store.WriteIntent (intent.go) now rejects a write whose
+// timestamp collides with an already-recorded read on the same key -- the write-skew
+// defense described in docs/notes/14-serializable.md. DurableStore does not implement
+// RecordRead or the equivalent check yet, so that protection currently exists only in the
+// in-memory Store model this file's own doc comment says the real 2PC logic runs
+// unmodified against; a durable, Raft-replicated per-range TimestampCache is real,
+// separate work this closes for the primitive but not yet for this participant.
 type DurableStore struct {
 	rng rangeClient
 }
