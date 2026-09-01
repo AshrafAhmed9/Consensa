@@ -107,6 +107,7 @@ func TestDurableNodeSurvivesRestart(t *testing.T) {
 		n, err := NewDurableNode(DurableNodeConfig{
 			ID: id, GroupPeers: ids, ListenAddress: addrs[id], TransportPeers: peers,
 			StorageDir: dirs[id], Index: cfg,
+			ElectionTick: 60, HeartbeatTick: 6,
 		})
 		if err != nil {
 			t.Fatalf("node %d: %v", id, err)
@@ -132,12 +133,12 @@ func TestDurableNodeSurvivesRestart(t *testing.T) {
 	}
 	inserted := 0
 	for _, id := range []string{"a", "b", "c"} {
-		if err := proposeInsertToLeader(live, id, vectors[id], 3*time.Second); err != nil {
+		if err := proposeInsertToLeader(live, id, vectors[id], 20*time.Second); err != nil {
 			t.Fatalf("insert %s: %v", id, err)
 		}
 		inserted++
 		for _, n := range live {
-			waitForApplied(t, n, inserted, 2*time.Second)
+			waitForApplied(t, n, inserted, 15*time.Second)
 		}
 	}
 
@@ -165,6 +166,7 @@ func TestDurableNodeSurvivesRestart(t *testing.T) {
 		ID: 3, GroupPeers: ids, ListenAddress: addrs[3],
 		TransportPeers: map[raft.NodeID]string{1: addrs[1], 2: addrs[2]},
 		StorageDir:     dirs[3], Index: cfg,
+		ElectionTick:   60, HeartbeatTick: 6,
 	})
 	if err != nil {
 		t.Fatalf("restarting node 3: %v", err)

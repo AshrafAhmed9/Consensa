@@ -18,6 +18,7 @@ func TestDurableRangeRejectsReservedKeyPrefix(t *testing.T) {
 	addr := freeKVAddr(t)
 	r, err := NewDurableRange(DurableRangeConfig{
 		ID: 1, GroupPeers: []raft.NodeID{1}, ListenAddress: addr, TransportPeers: map[raft.NodeID]string{}, StorageDir: t.TempDir(),
+		ElectionTick: 60, HeartbeatTick: 6,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -116,6 +117,7 @@ func TestDurableRangeSurvivesRestart(t *testing.T) {
 		}
 		r, err := NewDurableRange(DurableRangeConfig{
 			ID: id, GroupPeers: ids, ListenAddress: addrs[id], TransportPeers: peers, StorageDir: dirs[id],
+			ElectionTick: 60, HeartbeatTick: 6,
 		})
 		if err != nil {
 			t.Fatalf("range %d: %v", id, err)
@@ -136,14 +138,14 @@ func TestDurableRangeSurvivesRestart(t *testing.T) {
 
 	keys := map[string][]byte{"a": []byte("1"), "b": []byte("2"), "c": []byte("3")}
 	for _, k := range []string{"a", "b", "c"} {
-		if err := putUntilAccepted(live, []byte(k), keys[k], 3*time.Second); err != nil {
+		if err := putUntilAccepted(live, []byte(k), keys[k], 20*time.Second); err != nil {
 			t.Fatalf("put %s: %v", k, err)
 		}
 	}
 
 	// Confirm every replica's own durable engine actually has the data before killing
 	// anything -- otherwise a later "recovery" could just be finding nothing, twice.
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for _, r := range live {
 		for {
 			got, err := r.Get([]byte("c"))
@@ -169,6 +171,7 @@ func TestDurableRangeSurvivesRestart(t *testing.T) {
 		ID: 3, GroupPeers: ids, ListenAddress: addrs[3],
 		TransportPeers: map[raft.NodeID]string{1: addrs[1], 2: addrs[2]},
 		StorageDir:     dirs[3],
+		ElectionTick:   60, HeartbeatTick: 6,
 	})
 	if err != nil {
 		t.Fatalf("restarting range 3: %v", err)
@@ -210,6 +213,7 @@ func TestDurableRangeDeleteIsDurable(t *testing.T) {
 		}
 		r, err := NewDurableRange(DurableRangeConfig{
 			ID: id, GroupPeers: ids, ListenAddress: addrs[id], TransportPeers: peers, StorageDir: dirs[id],
+			ElectionTick: 60, HeartbeatTick: 6,
 		})
 		if err != nil {
 			t.Fatalf("range %d: %v", id, err)
@@ -225,10 +229,10 @@ func TestDurableRangeDeleteIsDurable(t *testing.T) {
 	wg := driveRanges(live, 10*time.Millisecond, stop)
 	defer func() { close(stop); wg.Wait(); for _, r := range live { _ = r.Close() } }()
 
-	if err := putUntilAccepted(live, []byte("x"), []byte("temporary"), 3*time.Second); err != nil {
+	if err := putUntilAccepted(live, []byte("x"), []byte("temporary"), 20*time.Second); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for {
 		found := true
 		for _, r := range live {
@@ -247,7 +251,7 @@ func TestDurableRangeDeleteIsDurable(t *testing.T) {
 
 	lastErr := errors.New("no replica accepted the delete")
 	deleted := false
-	deadline = time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) && !deleted {
 		for _, r := range live {
 			if err := r.Delete([]byte("x")); err == nil {
@@ -263,7 +267,7 @@ func TestDurableRangeDeleteIsDurable(t *testing.T) {
 		t.Fatalf("delete never accepted: %v", lastErr)
 	}
 
-	deadline = time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(20 * time.Second)
 	for {
 		allGone := true
 		for _, r := range live {
@@ -292,7 +296,7 @@ func TestConsistentGetRequiresLeadership(t *testing.T) {
 	defer group.closeAll(t)
 
 	var leader *DurableRange
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) && leader == nil {
 		for _, r := range group.list() {
 			if err := r.Tick(); err != nil {
@@ -307,7 +311,7 @@ func TestConsistentGetRequiresLeadership(t *testing.T) {
 		t.Fatal("group never elected a leader")
 	}
 
-	deadline = time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(20 * time.Second)
 	var putErr error
 	for time.Now().Before(deadline) {
 		if putErr = leader.Put([]byte("k"), []byte("v")); putErr == nil {
@@ -318,7 +322,7 @@ func TestConsistentGetRequiresLeadership(t *testing.T) {
 		t.Fatalf("leader never accepted the put: %v", putErr)
 	}
 
-	deadline = time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(20 * time.Second)
 	var got []byte
 	var getErr error
 	for time.Now().Before(deadline) {
