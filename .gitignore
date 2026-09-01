@@ -28,3 +28,6 @@ harness/bench/data/
 # TLC model-checking output
 specs/states/
 specs/*.toolbox/
+
+# Personal interview prep — local reference only, never pushed
+docs/interview-prep.md
