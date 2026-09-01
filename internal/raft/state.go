@@ -59,7 +59,19 @@ type Message struct {
 // Config defines one fixed Raft group. Election ticks should be several heartbeats to
 // avoid stable leaders being replaced by ordinary heartbeat jitter.
 type Config struct {
-	ID                          NodeID
-	Peers                       []NodeID
+	ID    NodeID
+	Peers []NodeID
+	// Learners are members of Peers that receive log replication (so they can catch up
+	// before being promoted to a full voter) but never vote and are never counted toward
+	// quorum -- Raft's own answer to the problem PLAN.md's Phase 11 section names: adding
+	// a brand-new, empty replica directly as a voter temporarily WEAKENS fault tolerance
+	// (the cluster now needs a majority that includes a replica that has nothing yet),
+	// where adding it as a learner first does not, since quorum() never counts it. Every
+	// ID in Learners must also appear in Peers; promoting a learner to a voter is done by
+	// constructing a new Config without it in Learners, not by a live reconfiguration
+	// command -- that step (and the disjoint-majority-safe joint-consensus transition a
+	// live add/remove voter change needs) is Membership's (membership.go) job, and it is
+	// deliberately still not wired into this quorum path; see docs/adr/010-learners.md.
+	Learners                    []NodeID
 	ElectionTick, HeartbeatTick int
 }

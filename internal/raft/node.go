@@ -30,6 +30,8 @@ type Node interface {
 type node struct {
 	id                                                             NodeID
 	peers                                                          []NodeID
+	learners                                                       map[NodeID]bool
+	isLearner                                                      bool
 	role                                                           Role
 	term, vote, leader                                             uint64
 	log                                                            *raftLog
@@ -57,10 +59,41 @@ func NewNode(c Config) (Node, error) {
 	if !found {
 		return nil, errors.New("raft: local ID absent from peers")
 	}
-	return &node{id: c.ID, peers: append([]NodeID(nil), c.Peers...), log: newLog(), electionTick: c.ElectionTick, heartbeatTick: c.HeartbeatTick, next: map[NodeID]uint64{}, match: map[NodeID]uint64{}}, nil
+	learners := map[NodeID]bool{}
+	for _, l := range c.Learners {
+		isPeer := false
+		for _, p := range c.Peers {
+			isPeer = isPeer || p == l
+		}
+		if !isPeer {
+			return nil, errors.New("raft: learner must also be a peer")
+		}
+		learners[l] = true
+	}
+	if len(learners) >= len(c.Peers) {
+		return nil, errors.New("raft: at least one peer must be a voter")
+	}
+	return &node{
+		id: c.ID, peers: append([]NodeID(nil), c.Peers...), learners: learners, isLearner: learners[c.ID],
+		log: newLog(), electionTick: c.ElectionTick, heartbeatTick: c.HeartbeatTick,
+		next: map[NodeID]uint64{}, match: map[NodeID]uint64{},
+	}, nil
 }
 
-func (n *node) quorum() int { return len(n.peers)/2 + 1 }
+// voters returns peers excluding learners -- the set every quorum computation (elections,
+// commit advancement) counts over. Learners still appear in n.peers so broadcastAppend
+// still replicates the log to them; they are excluded here, not there.
+func (n *node) voters() []NodeID {
+	out := make([]NodeID, 0, len(n.peers))
+	for _, p := range n.peers {
+		if !n.learners[p] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func (n *node) quorum() int { return len(n.voters())/2 + 1 }
 func (n *node) Tick() {
 	n.electionElapsed++
 	if n.role == Leader {
@@ -70,7 +103,12 @@ func (n *node) Tick() {
 			n.broadcastAppend()
 		}
 	}
-	if n.electionElapsed >= n.electionTick && n.role != Leader {
+	// A learner never starts an election, no matter how long it goes without hearing
+	// from a leader: it isn't a voter, so it could never actually win one (no peer would
+	// count its vote request toward quorum -- see startPreVote/startElection below,
+	// which only message n.voters()) and letting it try would just be wasted messages on
+	// every election timeout for as long as it stays a learner.
+	if n.electionElapsed >= n.electionTick && n.role != Leader && !n.isLearner {
 		n.electionElapsed = 0
 		n.startPreVote()
 	}
@@ -209,8 +247,15 @@ func (n *node) handleAppendResp(m Message) {
 	}
 }
 func (n *node) advanceCommit() {
-	matches := make([]uint64, 0, len(n.peers))
-	for _, p := range n.peers {
+	// Only voters count toward what's committed -- Raft §5.4.2's safety property is
+	// "replicated on a majority of VOTERS," not "replicated on a majority of anything
+	// receiving the log." A learner's match progress still gets tracked (so it can be
+	// promoted once caught up) but must never let an entry be counted committed on the
+	// strength of learners alone, which would let a value be visible before it's actually
+	// safe against a leader election among the real voters.
+	voters := n.voters()
+	matches := make([]uint64, 0, len(voters))
+	for _, p := range voters {
 		matches = append(matches, n.match[p])
 	}
 	sort.Slice(matches, func(i, j int) bool { return matches[i] < matches[j] })
