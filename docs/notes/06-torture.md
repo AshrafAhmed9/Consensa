@@ -117,7 +117,15 @@ implemented here). **This DoD item is retired, not achieved** -- see ADR-007 for
 scripted deterministic test, not the seeded torture harness, is the right tool for this
 specific protocol property, matching how `TestFigure8CommitRule` already works.
 
-The Figure-8 DoD item remains genuinely open (unlike pre-vote, nothing here rules it out
-as structurally unreachable) -- a scripted, adversarial schedule targeting the exact
-log/match-index pattern the unit test already exercises, the same way this session's
-pre-vote work did, is the concrete next step if it's worth pursuing further.
+**The Figure-8 DoD item is now closed too, the way ADR-007 said it should be: with a
+scripted test, not a harder fault schedule.** `TestFigure8UnsafeCommitWouldBeOverwritten`
+(`internal/raft/raft_test.go`) drives the paper's actual 5-server scenario end to end
+through real `Step()` calls and shows a majority-replicated entry silently overwritten
+because it lacked an entry from the new leader's own term -- verified to fail correctly
+when the same guard is weakened again. Both halves of this phase's original DoD
+("catch a deliberately injected bug") are now resolved: Figure-8 by a scripted test,
+pre-vote by proving the property it was chasing doesn't exist for the class of fault the
+harness can generate at all (ADR-007). Random seeded search was the right first attempt,
+but neither gap needed more seeds -- both needed a human to construct the exact
+adversarial sequence, same as `TestFigure8CommitRule` already did at the single-node
+level before this session extended it to a full multi-node proof.

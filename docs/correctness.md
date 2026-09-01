@@ -35,13 +35,23 @@ widely shared method (`ann.ReplicatedIndex`, `kv.multiraft`, and this harness al
 `Cluster.Leader()`), not a narrow harness-only patch. With it fixed, the harness runs
 clean across 200+ seeds against the correct implementation.
 
-**The Figure-8 half of this phase's DoD ("harness catches a deliberately injected safety
-bug") remains open** — weakening the commit rule and running 500+ seeds under sustained
-isolation windows did not catch it. Traced to a mechanism: `Node.Tick()` never attempts
-an election for a node that already believes it is leader, so a uniformly random fault
-target only exercises election machinery at all when it happens to isolate a follower,
-and a scripted schedule (mirroring how `TestFigure8CommitRule` already reproduces the
-exact log/match state directly) is the credible next step, not more seeds.
+**The Figure-8 half of this phase's DoD is now closed, by a scripted test rather than
+the seeded harness.** Weakening the commit rule and running 500+ torture seeds under
+sustained isolation windows never caught it — a uniformly random fault target rarely
+produces the exact log-divergence-then-reconvergence pattern Figure 8 needs.
+`TestFigure8UnsafeCommitWouldBeOverwritten` (`internal/raft/raft_test.go`) closes it
+directly: it drives the paper's actual 5-server scenario through real `Step()` calls —
+real vote-freshness checks, real `AppendEntries` accept/reject/truncate, and the real
+`advanceCommit` term guard — and shows an entry replicated to a genuine 3-of-5 majority
+still gets silently overwritten by a later leader, because it was never anchored by an
+entry from that leader's own term. Verified as a real, discriminating check, not a
+vacuous one: it passes against the correct implementation and fails
+(`committed a prior-term entry despite the Figure-8 guard: committed=2`) when the same
+guard this session kept weakening in earlier torture-harness experiments is weakened
+again. Only the scenario's starting log/term states are hand-set (matching the
+existing `TestFigure8CommitRule`/`TestDelayedPreVoteResponseCannotRestartLeader`
+precedent in the same file); every safety-relevant decision after that runs through
+unmodified production code.
 
 **The pre-vote half of that DoD is retired, not achieved, and the reason is a real
 finding, not a harness shortcoming.** Testing an *asymmetric* partition — one follower
