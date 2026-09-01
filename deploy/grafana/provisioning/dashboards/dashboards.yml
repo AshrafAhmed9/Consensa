@@ -1,0 +1,12 @@
+# Auto-loads any dashboard JSON dropped in this directory on Grafana startup.
+apiVersion: 1
+
+providers:
+  - name: consensa
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    options:
+      path: /etc/grafana/provisioning/dashboards

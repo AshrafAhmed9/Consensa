@@ -1,0 +1,51 @@
+{
+  "title": "Consensa cluster overview",
+  "uid": "consensa-overview",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Raft term per node",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "consensa_raft_term",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "description": "A sudden jump on one node without a matching jump on its peers usually means that node lost contact with the cluster and is retrying an election alone."
+    },
+    {
+      "id": 2,
+      "title": "Request rate per node (QPS)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "consensa_range_qps",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "description": "Counts every Upsert/Search/Delete/BatchGet request received, including ones that failed -- this measures load received, not success rate."
+    },
+    {
+      "id": 3,
+      "title": "Not yet measured",
+      "type": "text",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 8 },
+      "options": {
+        "mode": "markdown",
+        "content": "**consensa_ann_recall is not wired yet.** It is registered but always reports zero -- there is deliberately no panel for it above, since a graph that can only ever show a flat zero line would misrepresent it as a measured quantity. See `docs/notes/13-observability.md` for what closing this needs."
+      }
+    }
+  ]
+}

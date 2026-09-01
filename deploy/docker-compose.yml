@@ -60,6 +60,31 @@ services:
     ports: ["8083:8080", "9093:9090"]
     volumes: ["consensa3-data:/data"]
 
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["demo"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    depends_on: [consensa1, consensa2, consensa3]
+
+  grafana:
+    image: grafana/grafana:11.3.1
+    profiles: ["demo"]
+    # Anonymous admin access is deliberate here and only here: this compose file is a
+    # local single-machine demo (see the top-of-file comment), never exposed beyond
+    # localhost port mappings. It exists so `docker compose up` produces a working
+    # dashboard with zero manual login steps, not because this is a safe default for
+    # anything reachable off the demo machine.
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+
 volumes:
   consensa1-data:
   consensa2-data:

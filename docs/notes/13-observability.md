@@ -47,5 +47,21 @@ sampling window, an instantaneous value like the Raft term does not.
 
 `consensa_ann_recall` remains unwired, deliberately left at zero rather than filled with a
 plausible-looking placeholder -- it needs a hook from `harness/bench`'s benchmark path
-into the running process, which does not exist yet. Grafana dashboards, structured JSON
-logging, and the `docker compose up` demo GIF remain entirely unbuilt.
+into the running process, which does not exist yet.
+
+**Grafana dashboards are now provisioned and verified against the real stack, not just
+written.** `deploy/docker-compose.yml` gained `prometheus` and `grafana` services;
+`deploy/prometheus/prometheus.yml` scrapes all three real nodes' `/metrics`, and
+`deploy/grafana/provisioning/` auto-loads a Prometheus data source and a
+`consensa-overview` dashboard with zero manual setup. Verified end to end with a real
+`docker compose --profile demo up --build`, not just YAML review: all three Prometheus
+targets came up healthy; `consensa_raft_term` queried real `1`s from a real 3-node
+election; the dashboard's three panels loaded exactly as provisioned; and — the part that
+actually proves the pipeline, not just the plumbing — issuing 20 real gRPC `Search`
+requests against one node made `consensa_range_qps` report a real, nonzero rate
+(`9`) on exactly that node for several seconds while the other two, which received no
+traffic, correctly stayed at `0`. The dashboard's third panel is a text panel stating
+plainly that recall is not measured yet, rather than shipping a graph that could only ever
+show a flat zero line.
+
+Structured JSON logging and the `docker compose up` demo GIF remain entirely unbuilt.

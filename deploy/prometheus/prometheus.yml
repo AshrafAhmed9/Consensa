@@ -1,0 +1,16 @@
+# Scrapes every consensa node's real /metrics endpoint by its compose service name --
+# there is no service discovery here on purpose: three static targets matching
+# docker-compose.yml's three fixed nodes is simpler and more legible than a discovery
+# mechanism this project has no other use for.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: consensa
+    static_configs:
+      - targets:
+          - consensa1:9090
+          - consensa2:9090
+          - consensa3:9090
+        labels:
+          cluster: consensa-demo
