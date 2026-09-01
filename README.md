@@ -87,9 +87,7 @@ Stated plainly rather than left implied by omission: no automatic range-split tr
 live traffic cutover; no multi-range transport batching beyond a shared listener (every
 range still dials its own outbound connections); no joint-consensus membership changes
 wired into the live voting path (the quorum math exists and is unit-tested,
-`internal/raft/membership.go`, but nothing calls it yet); `ConsensaKV.TransactionalPut`
-is proven against real `DurableRange` groups by its own dedicated test but not wired into
-`cmd/consensa`, which still only runs the vector plane; no serializable isolation
+`internal/raft/membership.go`, but nothing calls it yet); no serializable isolation
 (Phase 14 -- snapshot isolation's write-skew gap is reproduced as a test, not yet
 closed). ANN search
 is approximate by construction and is never described as linearizable; only the

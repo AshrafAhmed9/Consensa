@@ -43,9 +43,12 @@ type DurableRangeConfig struct {
 	GroupPeers     []raft.NodeID
 	ListenAddress  string
 	TransportPeers map[raft.NodeID]string
-	StorageDir     string
-	ElectionTick   int
-	HeartbeatTick  int
+	// Transport optionally attaches this range to a logical view of a shared listener.
+	// When nil, NewDurableRange creates its historical dedicated TCP listener.
+	Transport     raft.Transport
+	StorageDir    string
+	ElectionTick  int
+	HeartbeatTick int
 }
 
 // NewDurableRange opens (or recovers) the on-disk engine and starts the Raft host with
@@ -71,6 +74,7 @@ func NewDurableRange(cfg DurableRangeConfig) (*DurableRange, error) {
 		Raft:          raft.Config{ID: cfg.ID, Peers: cfg.GroupPeers, ElectionTick: electionTick, HeartbeatTick: heartbeatTick},
 		ListenAddress: cfg.ListenAddress,
 		Peers:         cfg.TransportPeers,
+		Transport:     cfg.Transport,
 		Persister:     raft.NewPersister(db),
 		Apply:         r.apply,
 	})

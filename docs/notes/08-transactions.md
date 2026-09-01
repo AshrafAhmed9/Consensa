@@ -48,12 +48,13 @@ groups, committed atomically. This is deliberately a separate gRPC service from
 `kv_service.go`'s doc comment for why mixing the two would be the wrong shape, not a
 convenience worth taking.
 
-What this still does not cover, stated plainly: it is not wired into `cmd/consensa`,
-which still only runs the vector plane -- `KVService` is proven by its own dedicated
-test against real `DurableRange` groups, not by a running production binary. There is
-also no single-key read/write RPC (every write goes through the full 2PC path, correct
-but not the cheapest shape for the common one-key case) and no automatic retry against
-`kv.ErrRangeKeyMismatch` the way `kv.RoutedKV.retryRoute` already models for the
-non-transactional path. `WriteIntent`'s conflict check also
+`cmd/consensa` now starts the vector group and two static KV ranges behind one shared
+Raft listener, then registers `KVService` alongside the vector gRPC service.
+`TestConsensaBinaryThreeProcessClusterSurvivesKillAndRestart` proves a real client can
+commit keys on both sides of the split through three separate OS processes before it
+exercises vector failover/recovery. There is still no single-key read/write RPC (every
+write goes through the full 2PC path, correct but not the cheapest shape for the common
+one-key case) and no automatic retry against `kv.ErrRangeKeyMismatch` the way
+`kv.RoutedKV.retryRoute` already models for the non-transactional path. `WriteIntent`'s conflict check also
 remains non-atomic with its own bookkeeping update under concurrent writers to the same
 key, for the same reason `kv.DurableRange` has no conditional Put to build a real fix on.

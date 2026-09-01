@@ -49,12 +49,11 @@ This session closed that gap for transactions specifically:
   cross-range transaction primitive" -- the resume claim can now say a batch write
   spanning ranges is atomic and crash-safe, backed by an integration test against real
   Raft groups, not just the existing single-node-model unit tests.
-- Not done, and deliberately out of scope for this pass: nothing in `cmd/consensa` or the
-  gRPC server (`internal/server`) calls `Coordinator` yet -- `DurableStore` is proven
-  reachable and correct, but no client-facing RPC drives it. `internal/kv.Router` also
-  doesn't yet know how to route a multi-range transactional write to the right
-  `DurableStore`s automatically; today's tests construct both participants by hand. Both
-  are real next steps, not silently dropped.
+- The next integration step is now complete: `cmd/consensa` starts two static
+  `DurableRange` groups (`[, split)` and `[split, +∞)`) on its shared Raft listener and
+  registers `ConsensaKV.TransactionalPut` on the production gRPC server. Its three-process
+  end-to-end test commits a transaction with one key in each group. Dynamic descriptors,
+  single-key KV RPCs, and client-side retry after a stale descriptor remain separate work.
 - `WriteIntent`'s conflict check remains non-atomic with its own index update (documented
   in `DurableStore`'s doc comment) -- a real race under concurrent writers to the same
   key, acceptable for now because `kv.DurableRange` has no conditional/compare-and-swap

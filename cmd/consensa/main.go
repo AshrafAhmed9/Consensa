@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,9 +20,11 @@ import (
 
 	consensav1 "github.com/ashraf/consensa/api/consensa/v1"
 	"github.com/ashraf/consensa/internal/ann"
+	"github.com/ashraf/consensa/internal/kv"
 	"github.com/ashraf/consensa/internal/metrics"
 	"github.com/ashraf/consensa/internal/raft"
 	"github.com/ashraf/consensa/internal/server"
+	"github.com/ashraf/consensa/internal/txn"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
 )
@@ -39,6 +42,7 @@ func main() {
 	dimension := flag.Int("dimension", 3, "fixed collection vector dimension")
 	metricsListen := flag.String("metrics-listen", ":9090", "Prometheus metrics listen address")
 	tickInterval := flag.Duration("tick-interval", 50*time.Millisecond, "how often this node advances its Raft clock")
+	kvSplitKey := flag.String("kv-split-key", "m", "static split key for the two durable transactional KV ranges")
 	flag.Parse()
 
 	if *id == 0 {
@@ -46,6 +50,9 @@ func main() {
 	}
 	if *dataDir == "" {
 		fatal("invalid startup configuration", "reason", "--data-dir is required")
+	}
+	if *kvSplitKey == "" {
+		fatal("invalid startup configuration", "reason", "--kv-split-key must not be empty")
 	}
 
 	allPeers, err := parsePeers(*peersFlag)
@@ -67,8 +74,22 @@ func main() {
 	}
 	sort.Slice(groupPeers, func(i, j int) bool { return groupPeers[i] < groupPeers[j] })
 
+	// Every local Raft group registers a logical transport view on this one listener.
+	// A deployment with vectors plus two KV ranges therefore still has exactly one peer
+	// socket per process; range IDs are carried inside the multiplexed transport envelope.
+	transport, err := raft.ListenMultiplexed(selfID, selfAddr)
+	if err != nil {
+		fatal("starting shared raft transport", "error", err)
+	}
+	defer func() {
+		if err := transport.Close(); err != nil {
+			slog.Error("closing shared raft transport", "error", err)
+		}
+	}()
+
 	node, err := ann.NewDurableNode(ann.DurableNodeConfig{
 		ID: selfID, GroupPeers: groupPeers, ListenAddress: selfAddr, TransportPeers: transportPeers,
+		Transport:  transport.Register(0, transportPeers),
 		StorageDir: *dataDir, Index: ann.Config{Dimension: *dimension, M: 16, EFConstruction: 64, EFSearch: 64, Seed: 1},
 	})
 	if err != nil {
@@ -79,6 +100,42 @@ func main() {
 			slog.Error("closing durable node", "error", err)
 		}
 	}()
+
+	newKVRange := func(rangeID uint64) *kv.DurableRange {
+		rangeNode, err := kv.NewDurableRange(kv.DurableRangeConfig{
+			ID: selfID, GroupPeers: groupPeers, ListenAddress: selfAddr, TransportPeers: transportPeers,
+			Transport:  transport.Register(rangeID, transportPeers),
+			StorageDir: filepath.Join(*dataDir, "kv", fmt.Sprintf("range-%d", rangeID)),
+		})
+		if err != nil {
+			fatal("starting durable KV range", "range_id", rangeID, "error", err)
+		}
+		return rangeNode
+	}
+	leftRange := newKVRange(1)
+	defer func() {
+		if err := leftRange.Close(); err != nil {
+			slog.Error("closing durable KV range", "range_id", 1, "error", err)
+		}
+	}()
+	rightRange := newKVRange(2)
+	defer func() {
+		if err := rightRange.Close(); err != nil {
+			slog.Error("closing durable KV range", "range_id", 2, "error", err)
+		}
+	}()
+	meta, err := kv.NewMeta([]kv.Descriptor{
+		{ID: 1, Start: nil, End: []byte(*kvSplitKey), Replicas: groupPeers},
+		{ID: 2, Start: []byte(*kvSplitKey), End: nil, Replicas: groupPeers},
+	})
+	if err != nil {
+		fatal("creating KV range descriptors", "error", err)
+	}
+	kvService := server.NewKVService(
+		kv.NewRouter(meta),
+		txn.NewCoordinator(txn.NewClock(time.Now)),
+		map[uint64]txn.Participant{1: txn.NewDurableStore(leftRange), 2: txn.NewDurableStore(rightRange)},
+	)
 
 	metricRegistry := metrics.NewRegistry()
 
@@ -97,6 +154,8 @@ func main() {
 				// is temporarily down -- both are ordinary and handled by internal/raft's
 				// own retry-on-next-heartbeat behavior, not something this loop must react to.
 				_ = node.Tick()
+				_ = leftRange.Tick()
+				_ = rightRange.Tick()
 				// Recall is reported separately by an external benchmark through
 				// /report-recall. RangeQPS is set separately below, since it is a rate over
 				// a fixed window rather than an instantaneous value like the Raft term.
@@ -175,7 +234,8 @@ func main() {
 	}
 	grpcServer := grpc.NewServer()
 	consensav1.RegisterConsensaServer(grpcServer, service)
-	slog.Info("consensa node started", "node_id", selfID, "raft_address", selfAddr, "grpc_address", *grpcListen, "metrics_address", *metricsListen, "data_dir", *dataDir)
+	consensav1.RegisterConsensaKVServer(grpcServer, kvService)
+	slog.Info("consensa node started", "node_id", selfID, "raft_address", selfAddr, "grpc_address", *grpcListen, "metrics_address", *metricsListen, "data_dir", *dataDir, "kv_split_key", *kvSplitKey, "raft_groups", 3)
 	if err := grpcServer.Serve(listener); err != nil {
 		fatal("gRPC server stopped", "error", err)
 	}

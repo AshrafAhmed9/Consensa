@@ -33,8 +33,9 @@ func (a *appliedLog) get(rangeID uint64, id NodeID) []string {
 }
 
 // multiplexedTestGroup builds one range's 3 Hosts, each attached to its node's shared
-// *MultiplexedTransport instead of opening its own TCP listener -- the wiring
-// multiplex.go's own doc comments describe: Register before NewHost, SetHandler after.
+// *MultiplexedTransport instead of opening its own TCP listener. NewHost attaches its
+// inbound handler to the logical view, so higher-level range constructors do not need a
+// transport-specific post-construction step.
 func multiplexedTestGroup(t *testing.T, rangeID uint64, transports map[NodeID]*MultiplexedTransport, ids []NodeID, applied *appliedLog) map[NodeID]*Host {
 	t.Helper()
 	addrs := map[NodeID]string{}
@@ -65,7 +66,6 @@ func multiplexedTestGroup(t *testing.T, rangeID uint64, transports map[NodeID]*M
 		if err != nil {
 			t.Fatalf("range %d node %d: %v", rangeID, id, err)
 		}
-		view.SetHandler(host.Step)
 		hosts[id] = host
 	}
 	return hosts

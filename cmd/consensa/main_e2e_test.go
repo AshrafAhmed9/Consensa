@@ -146,6 +146,19 @@ func dialNode(t *testing.T, addr string) consensav1.ConsensaClient {
 	return consensav1.NewConsensaClient(conn)
 }
 
+// dialKVNode opens the companion transactional-KV service hosted by the same real
+// consensa process as the vector API. Keeping separate clients mirrors the protobuf's
+// deliberately separate services while exercising the one shared gRPC listener.
+func dialKVNode(t *testing.T, addr string) consensav1.ConsensaKVClient {
+	t.Helper()
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial KV %s: %v", addr, err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return consensav1.NewConsensaKVClient(conn)
+}
+
 // upsertUntilAccepted retries an insert across every client until one succeeds. Real
 // distributed writes have no notion of "the" endpoint -- a client is expected to retry
 // against the group until it happens to reach the current leader, exactly as
@@ -172,6 +185,33 @@ func upsertUntilAccepted(t *testing.T, clients []consensav1.ConsensaClient, id s
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("no node accepted upsert of %q within %s: %v", id, deadline, lastErr)
+}
+
+// transactionalPutUntilAccepted retries the coordinator RPC across process endpoints,
+// just like vector upsert retries: each endpoint hosts its local replica of every range,
+// and only the process currently leading both static ranges can drive this compact
+// demonstration topology. The server never pretends a follower can commit a transaction.
+func transactionalPutUntilAccepted(t *testing.T, clients []consensav1.ConsensaKVClient, txnID string, writes map[string][]byte, deadline time.Duration) {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	var lastErr error
+	for time.Now().Before(end) {
+		for _, client := range clients {
+			// A cross-range commit performs several ordered Raft proposals (record,
+			// intent, index, commit record, resolution) and each DurableStore call
+			// waits for local visibility. It is not comparable to one streaming upsert,
+			// so a 2-second RPC budget can cancel a healthy coordinator halfway through.
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_, err := client.TransactionalPut(ctx, &consensav1.TransactionalPutRequest{TxnId: txnID, Writes: writes})
+			cancel()
+			if err == nil {
+				return
+			}
+			lastErr = err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("no node committed transaction %q within %s: %v", txnID, deadline, lastErr)
 }
 
 func searchOn(t *testing.T, client consensav1.ConsensaClient, query []float32, k int, deadline time.Duration) []*consensav1.SearchResult {
@@ -234,9 +274,11 @@ func TestConsensaBinaryThreeProcessClusterSurvivesKillAndRestart(t *testing.T) {
 	}()
 
 	var clients []consensav1.ConsensaClient
+	var kvClients []consensav1.ConsensaKVClient
 	for _, id := range ids {
 		waitForListening(t, nodes[id].grpcAddr, 10*time.Second)
 		clients = append(clients, dialNode(t, nodes[id].grpcAddr))
+		kvClients = append(kvClients, dialKVNode(t, nodes[id].grpcAddr))
 	}
 
 	upsertUntilAccepted(t, clients, "a", []float32{1, 0, 0, 0}, 10*time.Second)
@@ -260,6 +302,15 @@ func TestConsensaBinaryThreeProcessClusterSurvivesKillAndRestart(t *testing.T) {
 			t.Fatalf("node %d: search for nearest to (1,0,0,0) = %v, want [a]", id, results)
 		}
 	}
+
+	// "apple" and "zebra" fall on opposite sides of the binary's default "m" split.
+	// A successful call therefore proves the shipped process assembled two independent
+	// durable ranges, routed both keys, and drove their real 2PC coordinator over gRPC;
+	// internal/server/kv_service_test.go separately reads both values to prove resolution.
+	transactionalPutUntilAccepted(t, kvClients, "binary-cross-range", map[string][]byte{
+		"apple": []byte("fruit"),
+		"zebra": []byte("animal"),
+	}, 40*time.Second)
 
 	// The metrics registry (internal/metrics) was previously registered and exposed over
 	// HTTP but never actually updated -- /metrics would always report consensa_raft_term

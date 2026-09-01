@@ -23,10 +23,9 @@ import (
 // no single-key read or write RPC (a transaction of size one is still a transaction here,
 // which is correct but not the cheapest path for the common case); no automatic retry
 // against kv.ErrRangeKeyMismatch (see kv.RoutedKV.retryRoute for the pattern this would
-// need); and it is not wired into cmd/consensa, which still only runs the vector plane --
-// KVService is proven by its own dedicated integration test
-// (internal/server/kv_service_test.go) against real DurableRange groups, not by a running
-// production binary.
+// need). cmd/consensa assembles two static DurableRange groups on its shared transport and
+// registers this service beside the vector API; main_e2e_test.go proves that a real client
+// reaches this path through three separate binary processes.
 type KVService struct {
 	consensav1.UnimplementedConsensaKVServer
 	router      *kv.Router

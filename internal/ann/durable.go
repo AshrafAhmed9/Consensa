@@ -33,10 +33,13 @@ type DurableNodeConfig struct {
 	GroupPeers     []raft.NodeID
 	ListenAddress  string
 	TransportPeers map[raft.NodeID]string
-	StorageDir     string
-	Index          Config
-	ElectionTick   int
-	HeartbeatTick  int
+	// Transport optionally attaches this group to a logical view of a shared listener.
+	// When nil, NewDurableNode creates its historical dedicated TCP listener.
+	Transport     raft.Transport
+	StorageDir    string
+	Index         Config
+	ElectionTick  int
+	HeartbeatTick int
 }
 
 // NewDurableNode opens (or recovers) the on-disk engine, builds a fresh HNSW graph, and
@@ -67,6 +70,7 @@ func NewDurableNode(cfg DurableNodeConfig) (*DurableNode, error) {
 		Raft:          raft.Config{ID: cfg.ID, Peers: cfg.GroupPeers, ElectionTick: electionTick, HeartbeatTick: heartbeatTick},
 		ListenAddress: cfg.ListenAddress,
 		Peers:         cfg.TransportPeers,
+		Transport:     cfg.Transport,
 		Persister:     raft.NewPersister(db),
 		Apply:         d.apply,
 	})

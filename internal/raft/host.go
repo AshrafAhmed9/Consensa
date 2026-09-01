@@ -2,6 +2,7 @@ package raft
 
 import (
 	"errors"
+	"sort"
 	"sync"
 	"time"
 )
@@ -36,6 +37,14 @@ type Host struct {
 	progress  chan struct{}
 }
 
+// inboundTransport is implemented by a logical view of a shared transport. Host installs
+// its Step handler itself once construction has succeeded, keeping the Register → Host →
+// SetHandler handshake out of every higher-level range constructor.
+type inboundTransport interface {
+	Transport
+	SetHandler(func(Message) error)
+}
+
 // NewHost restores its node before accepting messages, then either starts a dedicated TCP
 // listener or attaches to a caller-supplied shared Transport. The recovery-before-listen
 // order prevents a rebooted node from answering an RPC using an empty term or log after
@@ -51,7 +60,7 @@ func NewHost(config HostConfig) (*Host, error) {
 	// from the persisted replica identity instead. All replicas still use the same
 	// configured base, while the first campaign is separated by at least one tick.
 	raftConfig := config.Raft
-	raftConfig.ElectionTick += hostElectionStagger(raftConfig.ID, raftConfig.ElectionTick)
+	raftConfig.ElectionTick += hostElectionStagger(raftConfig.ID, raftConfig.Peers, raftConfig.ElectionTick)
 	node, err := RecoverNode(raftConfig, config.Persister)
 	if err != nil {
 		return nil, err
@@ -59,6 +68,9 @@ func NewHost(config HostConfig) (*Host, error) {
 	host := &Host{node: node, persister: config.Persister, apply: config.Apply, progress: make(chan struct{})}
 	if config.Transport != nil {
 		host.transport = config.Transport
+		if transport, ok := config.Transport.(inboundTransport); ok {
+			transport.SetHandler(host.Step)
+		}
 		return host, nil
 	}
 	transport, err := ListenTCP(config.Raft.ID, config.ListenAddress, config.Peers, host.Step)
@@ -69,16 +81,29 @@ func NewHost(config HostConfig) (*Host, error) {
 	return host, nil
 }
 
-// hostElectionStagger returns a deterministic offset strictly smaller than half the
-// configured timeout. It is deliberately an adapter concern: NewNode remains a pure,
-// exactly-ticked state machine for the simulator, whereas a real Host needs the
-// wall-clock election de-synchronization Raft relies on in production.
-func hostElectionStagger(id NodeID, base int) int {
-	span := base / 2
-	if span < 1 {
-		span = 1
+// hostElectionStagger returns a deterministic offset distributed across one base timeout.
+// It is deliberately an adapter concern: NewNode remains a pure, exactly-ticked state
+// machine for the simulator, whereas a real Host needs the wall-clock election
+// de-synchronization Raft relies on in production. Spreading voters across [base, 2*base)
+// gives the first candidate enough time to complete a TCP pre-vote/election before the
+// next one campaigns; a one-tick spread was still too narrow under real fsync and race
+// detector scheduling. The sorted membership rank, rather than a raw node ID, keeps the
+// bound stable for sparse IDs and gives independently hosted static ranges the same
+// deterministic first leader.
+func hostElectionStagger(id NodeID, peers []NodeID, base int) int {
+	if base < 1 || len(peers) == 0 {
+		return 1
 	}
-	return 1 + int((uint64(id)-1)%uint64(span))
+	ordered := append([]NodeID(nil), peers...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+	for position, peer := range ordered {
+		if peer == id {
+			return 1 + position*base/len(ordered)
+		}
+	}
+	// NewNode will reject a local ID absent from peers. Keep this helper total so the
+	// caller still returns that useful validation error instead of panicking first.
+	return 1
 }
 
 // Addr returns the peer address assigned to this host.
