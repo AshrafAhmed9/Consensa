@@ -51,11 +51,15 @@ blocking unrelated writes.
   `Read` do not auto-record every read. This keeps existing callers' behavior unchanged
   and makes the serializable path opt-in rather than a silent behavior change to every
   read in the system.
-- `DurableStore`, the Raft-backed `Participant` used in production, does not implement
-  this check yet -- the protection currently exists only in the in-memory `Store` model
-  the 2PC protocol logic is proven against, not yet in the durable, replicated path. A
-  real per-range, durable `TimestampCache` (surviving restart, per this file's own "what
-  can fail" section above) is separate work.
+- **Update: `DurableStore` now implements this too.** `RecordRead` durably persists each
+  key's high-water read mark through the same real Raft-replicated range `PutRecord`/
+  `WriteIntent` already use, and `WriteIntent` rejects a write at or below that mark.
+  `TestDurableStoreRejectsWriteSkew` reproduces the identical two-doctors-on-call scenario
+  against a real 3-node `kv.DurableRange` group. The read-then-write check is still not
+  atomic with a concurrent call to the same key -- the same class of race
+  `DurableStore.WriteIntent`'s own doc comment already states for its intent-conflict
+  check, for the same reason: `kv.DurableRange` has no conditional/compare-and-swap Put to
+  build a race-free version on.
 - No read-refresh: the classic full SSI/CockroachDB design lets a pushed transaction
   re-validate its own prior reads at the new timestamp and continue if nothing changed,
   rather than aborting outright. That refinement is not implemented -- this closes
