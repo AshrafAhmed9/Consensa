@@ -35,14 +35,30 @@ structure to rebuild, so recovery is just `storage.Engine`'s own WAL/SSTable rec
 `DurableRange` adds no recovery logic of its own, which is the point of building it that
 way rather than copying `DurableNode`'s replay pattern verbatim.
 
+`TestRouterDirectsRealRangesAndIsolatesFailure` closes the routing half of the gap: two
+independent ranges, each a real 3-node `DurableRange` group over real TCP, with `Router`
+resolving keys to the correct range by key boundary. It proves three things at once --
+`Router` really does send different keys to different ranges' real leaders (not just an
+in-memory `Cluster` standing in for one); a key never lands on the wrong range's replicas
+(cross-contamination would mean the boundary check was decorative); and killing range A's
+leader has *zero* effect on range B's leadership or term, proving range isolation under a
+real failure rather than assuming it from the descriptors being logically separate.
+
+This deliberately does **not** add a server-side "find the leader of this range and
+forward" abstraction to `DurableRange` or a wrapper type. `internal/ann.DurableNode`
+already established that retrying across replicas is the client's job (see
+`docs/notes/05-api.md`); giving ranges a different contract here would be an
+inconsistency introduced for convenience, not a real simplification. The test's own
+`routedPut` helper plays the client's role, the same way `upsertUntilAccepted` does in
+`cmd/consensa/main_e2e_test.go`.
+
 Still genuinely missing, unchanged in kind from before: **one range still means one Raft
-transport** (one TCP listener, one storage directory) -- `DurableRange` proves the
-per-range durability story, not the multi-range multiplexing the plan actually calls for
-(many ranges sharing one transport with batched cross-range heartbeats). `DurableRange` is
-also not yet wired into `Router`/`RoutedKV` the way `DurableNode` is wired into
-`cmd/consensa/main.go` -- there is no durable, routed, multi-range binary yet, only a
-durable single-range replica type with its own standalone test. Replica movement and
-dynamic range policy also remain later work.
+transport** (one TCP listener, one storage directory) -- proven routing and proven
+isolation are not the same claim as the multi-range multiplexing the plan actually calls
+for (many ranges sharing one transport with batched cross-range heartbeats). Nothing
+durable is wired into a real binary yet either -- `cmd/consensa` still only runs a single
+`DurableNode`, not a routed, multi-range deployment. Replica movement and dynamic range
+policy also remain later work.
 
 ## What can fail?
 
