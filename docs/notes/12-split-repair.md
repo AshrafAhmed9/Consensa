@@ -122,7 +122,8 @@ confirms migration actually completed, and new writes spanning both halves of th
 original keyspace keep succeeding afterward -- proving live traffic cutover, not just
 silent data migration into orphaned ranges nothing can route to.
 
-Two real bugs were found and fixed while wiring this, neither by inspection:
+Three real bugs were found and fixed while wiring this, none by inspection -- each
+caught by an actual CI failure, not a local hunch:
 `AllKeys` previously filtered only Raft's own `"raft/"` reserved prefix, not
 `internal/txn`'s equally-reserved `"txn/"` bookkeeping prefix (that package's own doc
 comment already claimed this convention, but `AllKeys` never actually honored it) --
@@ -131,9 +132,20 @@ and every migration attempt failed with `"kv: split key outside parent interior"
 Separately, a transient migration failure was re-triggering `newChild` on the very same
 range IDs on every retry tick, opening a second `storage.Engine` against a directory the
 first attempt's `Host` was still actively using -- corrupting the WAL and crashing the
-whole process via `newKVRange`'s own `fatal()`. Both are fixed:
-`executeSplitIfRecommended` now caches the two child ranges across retries of the same
-parent, and `AllKeys` excludes both reserved prefixes.
+whole process via `newKVRange`'s own `fatal()`. `executeSplitIfRecommended` now caches
+the two child ranges across retries of the same parent, and `AllKeys` excludes both
+reserved prefixes.
+
+Third, and the one that took real CI evidence to see: `kv.ExecuteLiveSplit`'s own
+`putAndConfirm` only checked whether a key had become visible (`Get`) inside the branch
+where this process's own `Put` had just succeeded -- so a process whose local replica
+never won the new child group's leadership (2 of the 3, always) kept retrying `Put`
+until `perKeyTimeout` on every single key, never once checking whether the actual leader
+(a different process) had already committed and replicated the value to it. CI showed
+this precisely: one process logged "live split executed" within a second of the decision
+firing, while the other two spent the entire test deadline retrying "not leader" on data
+that had already arrived locally via ordinary replication. `putAndConfirm` now checks
+`Get` on every iteration regardless of whether `Put` itself succeeded this round.
 
 **What this still does not prove, stated plainly:** transaction bookkeeping keys
 (`txn/...`) are now deliberately excluded from migration, not moved with the data they

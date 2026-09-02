@@ -68,13 +68,27 @@ func ExecuteLiveSplit(parentDescriptor Descriptor, parentData map[string][]byte,
 // putAndConfirm proposes key/value against target, retrying past a "not leader" error
 // (this process's local replica may not yet -- or ever -- lead the new group) until the
 // write is actually confirmed visible via Get, or perKeyTimeout elapses.
+//
+// Get is checked on every iteration, not only after a locally successful Put: when
+// multiple processes independently call ExecuteLiveSplit against their own local replica
+// of the same child group (cmd/consensa's design -- see its own doc comment), only
+// whichever one is actually leader can ever make Put succeed, but the value it commits
+// still replicates to every other process's local replica, including ones whose own Put
+// calls keep failing "not leader" for the group's entire lifetime. Checking Get only
+// inside the Put-succeeded branch would make a non-leader process spin until
+// perKeyTimeout on every single key even though the real leader (a different process)
+// already finished the migration -- found as a real bug via a CI failure where the
+// actual leader logged "live split executed" within a second while the other two
+// processes kept retrying "not leader" for the rest of the test's deadline, since they
+// never once checked whether the key had already arrived by replication.
 func putAndConfirm(target splitTarget, key, value []byte, perKeyTimeout time.Duration) error {
 	deadline := time.Now().Add(perKeyTimeout)
 	var lastErr error
 	for {
 		if err := target.Put(key, value); err != nil {
 			lastErr = err
-		} else if got, err := target.Get(key); err == nil && bytes.Equal(got, value) {
+		}
+		if got, err := target.Get(key); err == nil && bytes.Equal(got, value) {
 			return nil
 		}
 		if time.Now().After(deadline) {
