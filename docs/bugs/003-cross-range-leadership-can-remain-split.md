@@ -67,3 +67,12 @@ general server-side-forwarding feature `docs/notes/05-api.md` already documents 
 out of scope for the whole project, not just this path. Both are real, non-trivial
 design work — correctly scoped as future work rather than rushed here, matching how
 `docs/adr/007` treats pre-vote's own unfixed gap.
+
+**Mitigation landed:** `hostElectionStagger`'s spread was widened 4x
+(`electionStaggerSpread` in `internal/raft/host.go`), giving the favored (lowest-ranked)
+node a much larger head start over the next-ranked node across all three co-located
+groups. This does not change the underlying architectural gap above — it only makes the
+"stable split" outcome less likely by making the bias each group's election already has
+much harder for real network jitter to overcome. `TestConsensaBinaryThreeProcessClusterSurvivesKillAndRestart`
+passed 3/3 clean runs locally after the change (previously intermittent); this is
+evidence of a lowered flake rate, not a proof the split can no longer happen.

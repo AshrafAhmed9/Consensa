@@ -81,15 +81,28 @@ func NewHost(config HostConfig) (*Host, error) {
 	return host, nil
 }
 
+// electionStaggerSpread widens the gap hostElectionStagger puts between consecutively
+// ranked peers, beyond the raw [base, 2*base) range the position-based formula alone
+// would produce. A process that hosts several independently-elected Raft groups sharing
+// one deployment (cmd/consensa's vector index plus its KV ranges, all built from the same
+// peer list) relies on the SAME node winning every one of those groups' elections, since
+// nothing forwards a request to a different process's leader (docs/notes/05-api.md). The
+// position-based formula alone gives the favored (lowest-ranked) node only a fractional
+// head start over the next-ranked node, which real network delivery jitter between
+// otherwise-identical, independently-timed groups can occasionally overcome -- producing
+// a real, observed failure (docs/bugs/003) where different processes end up leading
+// different co-located groups. Multiplying the spread gives the favored node a much
+// larger, harder-to-overcome head start without changing anything about which node is
+// favored or the safety of the election protocol itself -- Raft's safety never depends on
+// the exact size of this gap, only on some real desynchronization existing at all.
+const electionStaggerSpread = 4
+
 // hostElectionStagger returns a deterministic offset distributed across one base timeout.
 // It is deliberately an adapter concern: NewNode remains a pure, exactly-ticked state
 // machine for the simulator, whereas a real Host needs the wall-clock election
-// de-synchronization Raft relies on in production. Spreading voters across [base, 2*base)
-// gives the first candidate enough time to complete a TCP pre-vote/election before the
-// next one campaigns; a one-tick spread was still too narrow under real fsync and race
-// detector scheduling. The sorted membership rank, rather than a raw node ID, keeps the
-// bound stable for sparse IDs and gives independently hosted static ranges the same
-// deterministic first leader.
+// de-synchronization Raft relies on in production. The sorted membership rank, rather
+// than a raw node ID, keeps the bound stable for sparse IDs and gives independently
+// hosted static ranges the same deterministic first leader.
 func hostElectionStagger(id NodeID, peers []NodeID, base int) int {
 	if base < 1 || len(peers) == 0 {
 		return 1
@@ -98,7 +111,7 @@ func hostElectionStagger(id NodeID, peers []NodeID, base int) int {
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
 	for position, peer := range ordered {
 		if peer == id {
-			return 1 + position*base/len(ordered)
+			return 1 + position*base*electionStaggerSpread/len(ordered)
 		}
 	}
 	// NewNode will reject a local ID absent from peers. Keep this helper total so the
