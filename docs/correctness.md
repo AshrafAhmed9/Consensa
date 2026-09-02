@@ -175,12 +175,21 @@ does *not* prove) lives — this section is a current index, not a replacement f
   `AdminService`, all triggered off real threshold-crossing writes inside the shipped
   binary (`TestConsensaBinaryExecutesALiveSplitAutomatically`) — a new
   `consensa_kv_split_executed_total` counter distinguishes real completion from the
-  decision-only gauge. The vector plane's own proof is not yet wired to the same
-  automatic trigger. Two real bugs were found and fixed while closing this: `AllKeys` was
-  filtering only Raft's reserved key prefix, not `internal/txn`'s equally-reserved one,
-  which could pick an invalid split key from transaction bookkeeping; a transient
-  migration failure was re-opening the same child ranges' storage on every retry,
-  corrupting it. See `docs/notes/12-split-repair.md`.
+  decision-only gauge. The vector plane now has the identical automatic execution path
+  (`ann.ExecuteLiveSplit`, `executeAnnSplitIfRecommended`,
+  `TestConsensaBinaryExecutesALiveVectorSplitAutomatically`), including a new routing
+  layer for `server.Service` (`ann.Meta`/`RegisterIndex`, with `Search` fanning out across
+  every registered range and merging by distance, since a query vector carries no ID to
+  route by) that did not exist before. Real bugs were found and fixed while closing this,
+  on both planes: `AllKeys` was filtering only Raft's reserved key prefix, not
+  `internal/txn`'s equally-reserved one, which could pick an invalid split key from
+  transaction bookkeeping; a transient migration failure was re-opening the same child
+  ranges' storage on every retry, corrupting it; `HNSW.Insert` silently contradicted its
+  own "adds or replaces" doc comment by erroring on a duplicate ID, which permanently
+  wedged a replica's Raft loop when `ExecuteLiveSplit`'s legitimate retry-until-visible
+  pattern re-proposed an already-committed insert; and `TCPTransport.Send` had no write
+  deadline, so a stalled peer could hold a host's mutex forever. See
+  `docs/notes/12-split-repair.md`.
 - **Multi-range outbound connections are pooled.** Ranges on one node sharing a
   destination reuse one persistent TCP connection instead of dialing per message
   (`TestMultiplexedTransportPoolsOutboundConnections`). Making the receiving side read

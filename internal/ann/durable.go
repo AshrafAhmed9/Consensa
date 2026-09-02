@@ -161,6 +161,24 @@ func (d *DurableNode) GetVector(id string) (vector.Vector, bool) {
 	return d.index.GetVector(id)
 }
 
+// AllVectors returns a defensive copy of every vector this replica has applied so far --
+// the vector-plane counterpart of kv.DurableRange.AllKeys, used by MaybeSplitKey's own
+// decision and by ExecuteLiveSplit's caller to read the data a live split migrates.
+func (d *DurableNode) AllVectors() map[string]vector.Vector {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.index.AllVectors()
+}
+
+// MaybeSplitKey wires ShouldSplit to this replica's own applied state, mirroring
+// kv.DurableRange.MaybeSplitKey exactly. The error return exists for interface symmetry
+// with the KV version (executeSplitTarget-shaped callers in cmd/consensa expect it) even
+// though nothing here can actually fail short of a read that never touches Raft or disk.
+func (d *DurableNode) MaybeSplitKey(threshold int) (string, bool, error) {
+	splitKey, recommended := ShouldSplit(threshold, d.AllVectors())
+	return splitKey, recommended, nil
+}
+
 // Addr returns this replica's bound transport address, useful when ListenAddress was
 // "127.0.0.1:0" and the OS assigned the actual port.
 func (d *DurableNode) Addr() string { return d.host.Addr() }

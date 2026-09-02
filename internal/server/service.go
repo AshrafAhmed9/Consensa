@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"io"
+	"sort"
 	"sync"
 	"sync/atomic"
 )
@@ -29,18 +30,82 @@ type vectorGetter interface {
 	GetVector(string) (vector.Vector, bool)
 }
 
-// Service is the public API implementation. Its index can be local or Raft-backed.
+// Service is the public API implementation. Each registered index can be local or
+// Raft-backed, and a live split (cmd/consensa.executeAnnSplitIfRecommended) can register
+// new ones at runtime -- indicesMu guards indices the same way KVService.storesMu guards
+// its own range map (internal/server/kv_service.go), for the identical reason: Upsert/
+// Search/Delete/BatchGet read it from concurrent gRPC handler goroutines while a split's
+// background goroutine can call RegisterIndex live.
 type Service struct {
 	consensav1.UnimplementedConsensaServer
 	mu           sync.RWMutex
-	index        Index
+	meta         *ann.Meta
+	indicesMu    sync.RWMutex
+	indices      map[uint64]Index
 	vectors      map[string]vector.Vector
 	requestCount atomic.Uint64
 }
 
-// NewService creates an API service with a configured HNSW index.
+// NewService creates an API service with a single configured HNSW index, spanning the
+// entire ID space as range 1 -- the same single-range starting shape kv.NewMeta's two
+// static KV ranges use, so every existing caller (tests, cmd/consensa before a split ever
+// runs) keeps working unchanged. A live split later replaces this one-descriptor catalog
+// via meta.Replace and adds the fresh children via RegisterIndex.
 func NewService(index Index) *Service {
-	return &Service{index: index, vectors: map[string]vector.Vector{}}
+	meta, err := ann.NewMeta([]ann.Descriptor{{ID: 1, Start: "", End: "", Replicas: []raft.NodeID{1}}})
+	if err != nil {
+		// Unreachable: a single unbounded descriptor can never fail NewMeta's overlap or
+		// bounds checks. Panicking here would only ever fire if that invariant broke.
+		panic(err)
+	}
+	return &Service{meta: meta, indices: map[uint64]Index{1: index}, vectors: map[string]vector.Vector{}}
+}
+
+// RegisterIndex attaches index under rangeID so requests meta already routes to that ID
+// (via a prior or subsequent Meta.Replace) reach it -- the vector-plane counterpart of
+// KVService.RegisterStore, called by cmd/consensa once a live split's migration into a
+// fresh child completes.
+func (s *Service) RegisterIndex(rangeID uint64, index Index) {
+	s.indicesMu.Lock()
+	defer s.indicesMu.Unlock()
+	s.indices[rangeID] = index
+}
+
+// Meta exposes this service's routing metadata so cmd/consensa's split-execution path can
+// read the current catalog (Meta.All) and publish the post-split replacement
+// (Meta.Replace) without this Service needing its own bespoke split-wiring surface.
+func (s *Service) Meta() *ann.Meta { return s.meta }
+
+// indexFor resolves the index responsible for id via meta, then looks it up in indices --
+// two separate locks (meta's own, and indicesMu) because they are updated by two separate
+// calls (Meta.Replace, then RegisterIndex) that are not atomic with each other; a request
+// arriving in the narrow window between them simply retries, the same as any ordinary
+// ErrRangeKeyMismatch.
+func (s *Service) indexFor(id string) (Index, error) {
+	d, err := s.meta.Lookup(id)
+	if err != nil {
+		return nil, err
+	}
+	s.indicesMu.RLock()
+	defer s.indicesMu.RUnlock()
+	index, ok := s.indices[d.ID]
+	if !ok {
+		return nil, ann.ErrRangeKeyMismatch
+	}
+	return index, nil
+}
+
+// allIndices returns a defensive copy of every currently-registered index, for Search's
+// fan-out -- a query vector carries no ID to route by, so every range that could hold a
+// relevant neighbor must be searched and the results merged.
+func (s *Service) allIndices() []Index {
+	s.indicesMu.RLock()
+	defer s.indicesMu.RUnlock()
+	out := make([]Index, 0, len(s.indices))
+	for _, index := range s.indices {
+		out = append(out, index)
+	}
+	return out
 }
 
 // RequestCount returns the total number of data-plane requests (Search, Upsert, Delete,
@@ -75,18 +140,26 @@ func (s *Service) Upsert(stream consensav1.Consensa_UpsertServer) error {
 			return status.Error(codes.InvalidArgument, "duplicate ID in upsert stream")
 		}
 		seen[request.Id] = true
-		if err := s.index.Validate(vector.Vector(request.Vector.Values)); err != nil {
+		index, err := s.indexFor(request.Id)
+		if err != nil {
+			return status.Error(codes.Unavailable, err.Error())
+		}
+		if err := index.Validate(vector.Vector(request.Vector.Values)); err != nil {
 			return status.Error(codes.InvalidArgument, err.Error())
 		}
 	}
 	for _, request := range requests {
 		v := vector.Vector(request.Vector.Values)
+		index, err := s.indexFor(request.Id)
+		if err != nil {
+			return status.Error(codes.Unavailable, err.Error())
+		}
 		if _, exists := s.vectors[request.Id]; exists {
-			if err := s.index.Delete(request.Id); err != nil {
+			if err := index.Delete(request.Id); err != nil {
 				return status.Error(codes.Internal, err.Error())
 			}
 		}
-		if err := s.index.Insert(request.Id, v); err != nil {
+		if err := index.Insert(request.Id, v); err != nil {
 			return status.Error(codes.InvalidArgument, err.Error())
 		}
 		s.vectors[request.Id] = append(vector.Vector(nil), v...)
@@ -94,7 +167,13 @@ func (s *Service) Upsert(stream consensav1.Consensa_UpsertServer) error {
 	return stream.SendAndClose(&consensav1.UpsertResponse{Accepted: uint64(len(requests))})
 }
 
-// Search streams ordered ANN results so large result sets need not wait for response assembly.
+// Search streams ordered ANN results so large result sets need not wait for response
+// assembly. Unlike Upsert/Delete/BatchGet, a query vector carries no ID to route by, so
+// this fans out to every currently-registered range (allIndices), merges each range's own
+// top-(k+ef) candidates by ascending distance, and returns the overall top-k -- the
+// standard scatter-gather shape a sharded ANN index needs once data can live in more than
+// one range, matching how a real split leaves the vectors nearest any given query
+// potentially on either side of the new boundary.
 func (s *Service) Search(r *consensav1.SearchRequest, stream consensav1.Consensa_SearchServer) error {
 	s.requestCount.Add(1)
 	if r.Query == nil || len(r.Query.Values) == 0 || r.K == 0 {
@@ -102,11 +181,20 @@ func (s *Service) Search(r *consensav1.SearchRequest, stream consensav1.Consensa
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	rs, e := s.index.Search(vector.Vector(r.Query.Values), int(r.K), int(r.Ef))
-	if e != nil {
-		return status.Error(codes.InvalidArgument, e.Error())
+	indices := s.allIndices()
+	var merged []ann.Result
+	for _, index := range indices {
+		rs, e := index.Search(vector.Vector(r.Query.Values), int(r.K), int(r.Ef))
+		if e != nil {
+			return status.Error(codes.InvalidArgument, e.Error())
+		}
+		merged = append(merged, rs...)
 	}
-	for _, x := range rs {
+	sort.Slice(merged, func(i, j int) bool { return merged[i].Distance < merged[j].Distance })
+	if int(r.K) < len(merged) {
+		merged = merged[:r.K]
+	}
+	for _, x := range merged {
 		if e := stream.Send(&consensav1.SearchResult{Id: x.ID, Distance: x.Distance}); e != nil {
 			return e
 		}
@@ -123,7 +211,11 @@ func (s *Service) Delete(_ context.Context, request *consensav1.DeleteRequest) (
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.index.Delete(request.Id); err != nil {
+	index, err := s.indexFor(request.Id)
+	if err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
+	if err := index.Delete(request.Id); err != nil {
 		return nil, status.Error(codes.NotFound, err.Error())
 	}
 	delete(s.vectors, request.Id)
@@ -137,12 +229,13 @@ func (s *Service) BatchGet(_ context.Context, r *consensav1.BatchGetRequest) (*c
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := &consensav1.BatchGetResponse{Vectors: map[string]*consensav1.Vector{}}
-	getter, hasGetter := s.index.(vectorGetter)
 	for _, id := range r.Ids {
-		if hasGetter {
-			if v, ok := getter.GetVector(id); ok {
-				out.Vectors[id] = &consensav1.Vector{Values: v}
-				continue
+		if index, err := s.indexFor(id); err == nil {
+			if getter, ok := index.(vectorGetter); ok {
+				if v, ok := getter.GetVector(id); ok {
+					out.Vectors[id] = &consensav1.Vector{Values: v}
+					continue
+				}
 			}
 		}
 		if v, ok := s.vectors[id]; ok {
@@ -152,9 +245,18 @@ func (s *Service) BatchGet(_ context.Context, r *consensav1.BatchGetRequest) (*c
 	return out, nil
 }
 
-// Status reports the intentionally narrow initial node state.
+// Status reports this process's role for range 1 -- the original static range, always
+// present -- as a representative sample; a deployment with live splits has as many roles
+// as it has ranges, which this intentionally narrow single-value RPC does not attempt to
+// enumerate.
 func (s *Service) Status(context.Context, *consensav1.StatusRequest) (*consensav1.StatusResponse, error) {
-	if replicated, ok := s.index.(interface {
+	s.indicesMu.RLock()
+	index, ok := s.indices[1]
+	s.indicesMu.RUnlock()
+	if !ok {
+		return &consensav1.StatusResponse{Role: "single-node", Term: 0}, nil
+	}
+	if replicated, ok := index.(interface {
 		Status() (raft.NodeID, uint64, bool)
 	}); ok {
 		_, term, leader := replicated.Status()

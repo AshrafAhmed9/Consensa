@@ -76,6 +76,20 @@ func (t *TCPTransport) Send(message Message) error {
 		return err
 	}
 	defer func() { _ = connection.Close() }()
+	// Without a write deadline, a stalled peer (one whose own receive loop isn't draining
+	// its socket -- e.g. because it's itself blocked acquiring its Host's mutex under heavy
+	// load) can block this write indefinitely once the kernel's send buffer fills. Host.
+	// driveLocked calls Send while holding h.mu (host.go), so an indefinite block here
+	// holds that lock forever too -- which can cascade into a real cross-process deadlock
+	// if enough peers end up in this state simultaneously (found chasing an apparent hang
+	// in a heavy multi-group ann split test under real machine contention: many goroutines
+	// stuck inside this exact call, past their supposed 1-second dial timeout, which only
+	// bounds DialTimeout itself, not the write that follows). One second matches the dial
+	// timeout above; a write that slow indicates the same kind of unhealthy peer dialing
+	// already treats as a failure to route around.
+	if err := connection.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		return err
+	}
 	if err := writeFrame(connection, data); err != nil {
 		return err
 	}

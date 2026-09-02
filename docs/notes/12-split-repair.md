@@ -152,15 +152,69 @@ that had already arrived locally via ordinary replication. `putAndConfirm` now c
 describe -- acceptable because the parent range is kept around rather than deleted (so
 any in-flight transaction's own bookkeeping remains locally readable there), but a
 transaction that happens to still be in flight at the exact moment a split executes is an
-edge case this project has not modeled further. There is still no vector-plane execution
-wiring (the KV plane closes this gap; `internal/ann`'s own live-split proof
-(`TestLiveSplitPreservesSearchCorrectness`) is not yet triggered automatically by
-`cmd/consensa`). There is still no *in-flight request* cutover (an RPC already routed to
-the parent mid-split does not get redirected; a client must complete its current attempt,
-then re-route on its next one). No QPS-based trigger exists, only size. The "rebuild from
-scratch" strategy remains the most expensive of the three named options -- real
-production use would want incremental repair or a stale-parent-during-rebuild fallback to
-avoid the latency cliff every key pays while being re-inserted one at a time.
+edge case this project has not modeled further. There is still no *in-flight request*
+cutover (an RPC already routed to the parent mid-split does not get redirected; a client
+must complete its current attempt, then re-route on its next one). No QPS-based trigger
+exists, only size. The "rebuild from scratch" strategy remains the most expensive of the
+three named options -- real production use would want incremental repair or a
+stale-parent-during-rebuild fallback to avoid the latency cliff every key pays while
+being re-inserted one at a time.
+
+**Update: automatic split EXECUTION now also exists for the vector plane, closing the
+one remaining gap named just above.** `ann.ExecuteLiveSplit` (`internal/ann/execute_split.go`)
+is the vector-plane counterpart of `kv.ExecuteLiveSplit`: same "rebuild from scratch"
+strategy, migrating every applied vector into whichever fresh child owns it via a
+confirmed Insert/GetVector loop. It deliberately does NOT reuse the pre-existing
+`HNSW.Split` (`split.go`), which clones and repairs a graph already held in one process's
+own memory -- a live split spanning real, independently-running processes has to go
+through Raft the same way any other mutation does, which `HNSW.Split` was never built to
+do. `ann.ShouldSplit` provides the decision (median vector ID by sorted order -- the same
+minimum-viable, honestly-labeled limitation `kv.ShouldSplit` has: a lexicographic ID
+bisection, not a clustering-aware vector-space boundary, so recall near the boundary can
+dip until each child's own graph structure compensates. This is deliberately NOT PLAN.md's
+Phase 10 answer to HNSW-under-splits, which calls for a dedicated ADR measuring rebuild vs.
+incremental-repair vs. stale-parent strategies -- this is the minimum viable decision
+proving automatic execution works end-to-end for this plane too, postponing that measured
+work rather than inventing an unproven heuristic in its place).
+
+Unlike the KV plane's two static ranges, the vector plane previously had no routing layer
+at all -- `server.Service` held a single `index Index` field with no per-range map. It now
+holds `meta *ann.Meta` (mirroring `kv.Meta`/`kv.Router` exactly) plus `indices
+map[uint64]Index`, with `Upsert`/`Delete`/`BatchGet` routing by ID through `meta.Lookup`
+and `RegisterIndex` (the counterpart of `KVService.RegisterStore`) wiring in a live
+split's fresh children. `Search` has no ID to route by, so it fans out to every currently-
+registered range and merges each one's own top-k candidates by distance -- the standard
+scatter-gather shape a sharded ANN index needs once data can legitimately live in more
+than one range. `cmd/consensa.executeAnnSplitIfRecommended` wires the whole thing into the
+running binary exactly like its KV counterpart, using child range IDs `parentID*100+1/+2`
+(not KV's `*10`) so the two planes' transport-multiplexed range IDs, sharing the same
+`MultiplexedTransport`, can never collide -- both planes' parent IDs happen to be `1`,
+so `*10` would otherwise produce `11`/`12` for two entirely different Raft groups.
+`TestConsensaBinaryExecutesALiveVectorSplitAutomatically` proves it inside the real
+shipped binary, the vector-plane counterpart of the KV proof above.
+
+Two more real bugs were found and fixed chasing this, both by an apparent test hang, not
+by inspection. First: `HNSW.Insert`'s own doc comment claimed "adds or replaces an
+embedding," but the code actually returned an error for a duplicate ID instead of
+replacing. `ExecuteLiveSplit`'s own `insertAndConfirm` legitimately retries `Insert` for
+the same ID until it observes the value via `GetVector` (a prior attempt may already be
+committed but not yet visible -- see `kv.putAndConfirm`'s identical reasoning), and when
+a second proposal for an already-applied ID eventually committed too, `ApplyMutation`'s
+resulting error propagated out of `Host.driveLocked` *before* it reached `Node.Advance()`
+-- meaning that replica's Raft loop could never clear the entry and re-emitted the exact
+same committed entry, and every message alongside it, on every subsequent tick, forever.
+This is a real, general Raft-correctness principle, not an ann-specific quirk: an Apply
+callback must never fail for an entry that already achieved consensus, since there is no
+way to "reject" something the log already committed. Fixed by making `HNSW.Insert`
+actually implement the "replace" semantics its own doc comment already promised (delete
+the old node via `Delete`'s existing `Repair`-based cleanup, then insert fresh).
+
+Second, and only findable once the first was fixed: `internal/raft/tcp.go`'s
+`TCPTransport.Send` dialed with a 1-second timeout but never set a write deadline on the
+resulting connection -- a peer whose own receive loop stalls (for any reason, including
+the first bug above) could block a write indefinitely, and since `Host.driveLocked` calls
+`Send` while holding the host's own mutex, that indefinite block held the lock forever
+too. Fixed by setting a matching 1-second deadline on the connection before writing.
 
 ## What can fail?
 

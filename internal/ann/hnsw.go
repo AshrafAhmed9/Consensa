@@ -57,6 +57,17 @@ func (h *HNSW) GetVector(id string) (vector.Vector, bool) {
 	}
 	return append(vector.Vector(nil), node.v...), true
 }
+// AllVectors returns a defensive copy of every indexed vector, keyed by ID. It exists for
+// the same reason kv.DurableRange.AllKeys does: a live split needs this replica's own
+// full applied state, not the leader's, since ExecuteLiveSplit runs independently on
+// every replica against its own local graph.
+func (h *HNSW) AllVectors() map[string]vector.Vector {
+	out := make(map[string]vector.Vector, len(h.nodes))
+	for id, n := range h.nodes {
+		out[id] = append(vector.Vector(nil), n.v...)
+	}
+	return out
+}
 func (h *HNSW) level() int {
 	u := h.rng.Float64()
 	if u == 0 {
@@ -67,6 +78,20 @@ func (h *HNSW) level() int {
 
 // Insert adds or replaces an embedding. Equal inputs and insertion order produce equal graph
 // mutations; callers must serialize insertions through Raft before invoking it on replicas.
+//
+// A re-insert of an already-present ID removes the old node first (via Delete's own
+// Repair-based cleanup) rather than erroring: Apply (persist.go's ApplyMutation, called
+// from raft.Host.driveLocked while holding the host's own mutex) must never fail for an
+// entry that already achieved consensus, since Raft's own contract is that every replica
+// applies every committed entry in the same order -- a state machine that can reject an
+// already-committed entry has no recovery path but to replay and fail on it forever
+// (driveLocked returns before calling Node.Advance() on any apply error, so the identical
+// committed entry, and every queued outbound message alongside it, is re-emitted on every
+// subsequent tick). Found as a real bug: ExecuteLiveSplit's insertAndConfirm
+// (execute_split.go) legitimately retries Insert for the same ID until it observes the
+// value via GetVector, since a prior attempt may already be committed but not yet visible
+// -- a caller-side race this package's own doc comment for Insert already promised was
+// safe ("adds or replaces"), which the code did not actually implement before this fix.
 func (h *HNSW) Insert(id string, v vector.Vector) error {
 	if id == "" {
 		return errors.New("ann: empty ID")
@@ -75,7 +100,9 @@ func (h *HNSW) Insert(id string, v vector.Vector) error {
 		return err
 	}
 	if _, ok := h.nodes[id]; ok {
-		return errors.New("ann: duplicate ID")
+		if err := h.Delete(id); err != nil {
+			return err
+		}
 	}
 	n := &node{id: id, v: append(vector.Vector(nil), v...), level: h.level(), neighbors: map[int][]string{}}
 	if len(h.nodes) == 0 {

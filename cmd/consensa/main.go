@@ -26,6 +26,7 @@ import (
 	"github.com/ashraf/consensa/internal/raft"
 	"github.com/ashraf/consensa/internal/server"
 	"github.com/ashraf/consensa/internal/txn"
+	"github.com/ashraf/consensa/internal/vector"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
@@ -264,6 +265,92 @@ func executeSplitIfRecommended(
 	slog.Info("live split executed", "parent_range_id", parentID, "left_range_id", leftID, "right_range_id", rightID, "split_key", string(splitKey))
 }
 
+// annExecuteSplitTarget is the vector-plane counterpart of executeSplitTarget: the subset
+// of *ann.DurableNode executeAnnSplitIfRecommended needs from the parent it is checking.
+type annExecuteSplitTarget interface {
+	MaybeSplitKey(threshold int) (string, bool, error)
+	AllVectors() map[string]vector.Vector
+}
+
+// executeAnnSplitIfRecommended is executeSplitIfRecommended's vector-plane counterpart --
+// same structure, same reasoning (every process runs the identical check against
+// identical Raft-replicated applied state, so no cross-process coordination call is
+// needed to decide WHEN to split), built on ann.ExecuteLiveSplit instead of
+// kv.ExecuteLiveSplit. See ann.ShouldSplit's own doc comment for the one real limitation
+// this inherits: the split boundary is a lexicographic ID bisection, not a clustering-
+// aware vector-space boundary, so recall near that boundary can dip until each child's own
+// graph structure compensates -- deliberately the minimum viable decision proving
+// automatic execution works end-to-end, not PLAN.md's Phase 10 answer to HNSW-under-splits.
+//
+// leftID/rightID use *100, not KV's *10, so a vector-plane split's transport-multiplexed
+// range IDs (registered on the SAME shared MultiplexedTransport the KV ranges and their
+// own children use) can never collide with kv.DurableRange's own deterministic child IDs
+// (parentID*10+1/+2) -- both planes' parent IDs currently happen to be 1, so *10 would
+// otherwise produce identical transport IDs (11/12) for two entirely different Raft groups.
+func executeAnnSplitIfRecommended(
+	parentID uint64, parent annExecuteSplitTarget, parentDescriptor ann.Descriptor, threshold int,
+	newChild func(rangeID uint64) *ann.DurableNode,
+	meta *ann.Meta, service *server.Service,
+	startTicking func(*ann.DurableNode), splitExecutedCounter *prometheus.CounterVec,
+	executed map[uint64]bool, inProgress map[uint64][2]*ann.DurableNode, mu *sync.Mutex,
+) {
+	mu.Lock()
+	alreadyDone := executed[parentID]
+	children, attemptStarted := inProgress[parentID]
+	mu.Unlock()
+	if alreadyDone {
+		return
+	}
+
+	splitKey, recommended, err := parent.MaybeSplitKey(threshold)
+	if err != nil || !recommended {
+		return
+	}
+	parentVectors := parent.AllVectors()
+
+	leftID, rightID := parentID*100+1, parentID*100+2
+	if !attemptStarted {
+		left := newChild(leftID)
+		right := newChild(rightID)
+		startTicking(left)
+		startTicking(right)
+		children = [2]*ann.DurableNode{left, right}
+		mu.Lock()
+		inProgress[parentID] = children
+		mu.Unlock()
+	}
+	left, right := children[0], children[1]
+
+	leftDesc, rightDesc, err := ann.ExecuteLiveSplit(parentDescriptor, parentVectors, splitKey, leftID, rightID, left, right, 2*time.Second)
+	if err != nil {
+		slog.Error("live split: migration failed, will retry against the same child ranges next tick", "plane", "vector", "range_id", parentID, "error", err)
+		return
+	}
+
+	next := meta.All()
+	filtered := next[:0]
+	for _, d := range next {
+		if d.ID != parentID {
+			filtered = append(filtered, d)
+		}
+	}
+	filtered = append(filtered, leftDesc, rightDesc)
+	if err := meta.Replace(filtered); err != nil {
+		slog.Error("live split: publishing new routing metadata", "plane", "vector", "range_id", parentID, "error", err)
+		return
+	}
+
+	service.RegisterIndex(leftID, left)
+	service.RegisterIndex(rightID, right)
+
+	mu.Lock()
+	executed[parentID] = true
+	delete(inProgress, parentID)
+	mu.Unlock()
+	splitExecutedCounter.WithLabelValues(fmt.Sprint(parentID), fmt.Sprint(leftID), fmt.Sprint(rightID)).Inc()
+	slog.Info("live split executed", "plane", "vector", "range_id", parentID, "left_range_id", leftID, "right_range_id", rightID, "split_key", splitKey)
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	fatal := func(message string, args ...any) {
@@ -346,6 +433,19 @@ func main() {
 			slog.Error("closing durable node", "error", err)
 		}
 	}()
+
+	newAnnChild := func(rangeID uint64) *ann.DurableNode {
+		child, err := ann.NewDurableNode(ann.DurableNodeConfig{
+			ID: selfID, GroupPeers: groupPeers, Learners: learners, ListenAddress: selfAddr, TransportPeers: transportPeers,
+			Transport:  transport.Register(rangeID, transportPeers),
+			StorageDir: filepath.Join(*dataDir, "ann", fmt.Sprintf("range-%d", rangeID)),
+			Index:      ann.Config{Dimension: *dimension, M: 16, EFConstruction: 64, EFSearch: 64, Seed: 1},
+		})
+		if err != nil {
+			fatal("starting durable ann range", "range_id", rangeID, "error", err)
+		}
+		return child
+	}
 
 	newKVRange := func(rangeID uint64) *kv.DurableRange {
 		rangeNode, err := kv.NewDurableRange(kv.DurableRangeConfig{
@@ -550,6 +650,47 @@ func main() {
 	// --peers -- this binary does not yet forward writes to the leader on a client's
 	// behalf. Reads (Search/Validate) are served locally regardless of leadership.
 	service := server.NewService(node)
+
+	// startTickingAnn mirrors startTicking (above) for a live split's fresh vector-plane
+	// children, reusing the identical stopTicking channel every other range's ticking
+	// goroutine already stops on.
+	startTickingAnn := func(a *ann.DurableNode) {
+		go func() {
+			ticker := time.NewTicker(*tickInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopTicking:
+					return
+				case <-ticker.C:
+					_ = a.Tick()
+				}
+			}
+		}()
+	}
+
+	// vectorDescriptor matches server.NewService's own default single-range catalog
+	// (ID 1, unbounded) exactly -- kept here, not read back from service.Meta(), because
+	// executeAnnSplitIfRecommended needs the PARENT descriptor before any split has ever
+	// run, and this is the only place that shape is otherwise implicit.
+	vectorDescriptor := ann.Descriptor{ID: 1, Start: "", End: "", Replicas: groupPeers}
+	annSplitExecuted := map[uint64]bool{}
+	annSplitInProgress := map[uint64][2]*ann.DurableNode{}
+	var annSplitMu sync.Mutex
+	stopAnnSplitCheck := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(*splitCheckInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopAnnSplitCheck:
+				return
+			case <-ticker.C:
+				executeAnnSplitIfRecommended(1, node, vectorDescriptor, *splitThreshold, newAnnChild, service.Meta(), service, startTickingAnn, metricRegistry.SplitExecuted, annSplitExecuted, annSplitInProgress, &annSplitMu)
+			}
+		}
+	}()
+	defer close(stopAnnSplitCheck)
 
 	// consensa_range_qps is a rate, and Service.RequestCount is only a raw cumulative
 	// counter (see its own doc comment for why), so this loop samples the delta over a
