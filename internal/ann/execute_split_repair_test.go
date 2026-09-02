@@ -130,6 +130,37 @@ func TestExecuteLiveSplitByRepairMigratesRealVectors(t *testing.T) {
 	checkChildData(leftLive, wantLeft, "left child")
 	checkChildData(rightLive, wantRight, "right child")
 
+	// checkChildData above (mirroring TestExecuteLiveSplitMigratesRealVectors's own
+	// helper) only waits for ANY ONE replica to reach the target count -- sufficient for
+	// proving data correctness, but not for what checkChildIdentical below needs: a real
+	// bug was found here (reproduced under -race, which slows scheduling enough to expose
+	// it) where checkChildIdentical ran while two of three replicas had applied ZERO
+	// entries yet (AppliedCount 1/0/0), so their empty graphs trivially "diverged" from
+	// the one replica that had already applied the repair -- a test-timing bug, not a
+	// nondeterminism in Repair itself. waitAllConverged closes that gap by requiring EVERY
+	// replica to individually reach the target count before comparing snapshots.
+	waitAllConverged := func(live []*DurableNode, want map[string]vector.Vector, label string) {
+		t.Helper()
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			done := true
+			for _, n := range live {
+				if len(n.AllVectors()) != len(want) {
+					done = false
+				}
+			}
+			if done {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: not every replica converged to %d vectors", label, len(want))
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	waitAllConverged(leftLive, wantLeft, "left child")
+	waitAllConverged(rightLive, wantRight, "right child")
+
 	// Determinism: every replica of a child group must have applied the identical
 	// "repair" entry to an identical bit-level result, not merely the same vector set --
 	// this is what makes it safe for this operation to skip replicating the resulting
