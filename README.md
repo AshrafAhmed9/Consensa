@@ -97,7 +97,7 @@ does and doesn't cover, is in [`docs/correctness.md`](docs/correctness.md).
 | **Live range splits** | A shard splits into two fresh replica groups with no vector or key lost, duplicated, or leaking across the new boundary — proven on both the KV and vector planes, including publishing the new routing metadata atomically so both a fresh client and one holding a pre-split cached route resolve correctly afterward. |
 | **Joint-consensus membership changes** | Adding, promoting, or removing a replica goes through Raft's two-phase joint-consensus protocol, so a disjoint old/new majority can never both elect a leader — the specific failure mode joint consensus exists to prevent is covered directly. This now includes provisioning a genuinely new, previously-unknown process, not just reconfiguring already-known peers. |
 | **Read-path ladder** | Leader reads via a quorum-confirmed barrier (`ReadIndex`); follower reads via a replicated lease and closed timestamp, rejected until both are actually valid — not just modeled. |
-| **Write-skew prevention** | The classic "two on-call doctors" anomaly is reproduced and the specific write that would complete it is rejected, on both the in-memory and Raft-replicated code paths; a transaction pushed by that check can also read-refresh and commit anyway instead of always aborting, proven for the in-memory path. |
+| **Write-skew prevention** | The classic "two on-call doctors" anomaly is reproduced and the specific write that would complete it is rejected, on both the in-memory and Raft-replicated code paths; a transaction pushed by that check can also read-refresh and commit anyway instead of always aborting, proven on both paths too. |
 | **Formal verification** | TLA+ models of joint-consensus quorum intersection and recursive range splitting, model-checked by TLC — each with a deliberately broken variant that must fail, so the checker itself is proven discriminating. |
 | **Observability** | Real Prometheus metrics (Raft term, QPS, recall, and now the split-trigger recommendation) from a live process, rendered on an auto-provisioned Grafana dashboard, recall computed by an external client against an independent ground truth. |
 
@@ -130,15 +130,14 @@ automatically (a live split needs fresh child Raft groups stood up at runtime, r
 separate orchestration work); routing metadata can now cut over live and `cmd/consensa`
 already assembles a real `Router` for its two static ranges, but nothing in the running
 binary ever triggers a real split against it, and no in-flight request mid-split gets
-redirected; joint consensus can reconfigure replicas already known to a group, but there's
-joint consensus can now provision a genuinely new, previously-unknown process too
-(`Host.AddKnownPeer`/`Host.AddPeer`, proven in `internal/raft`), but no authenticated
-admin RPC surface triggers it over the network yet -- it's a proven primitive, not
-something `cmd/consensa` exposes; snapshot
-isolation now supports read-refresh (a pushed transaction re-validates its own prior
-reads instead of aborting outright), but only for the in-memory `Store` -- the real,
-Raft-replicated `DurableStore` still falls back to abort-and-retry; a running binary now
-advances the closed timestamp and automatically grants/renews follower-read leases on a
+redirected; joint consensus can now provision a genuinely new, previously-unknown
+process too (`Host.AddKnownPeer`/`Host.AddPeer`, proven in `internal/raft`), but no
+authenticated admin RPC surface triggers it over the network yet -- it's a proven
+primitive, not something `cmd/consensa` exposes; snapshot isolation now supports
+read-refresh (a pushed transaction re-validates its own prior reads instead of aborting
+outright), proven for both the in-memory `Store` and the real, Raft-replicated
+`DurableStore`; a running binary now advances the closed timestamp and automatically
+grants/renews follower-read leases on a
 real interval, but no RPC surface exposes follower reads to a network client yet. A real,
 intermittent limitation found and documented this session: a cross-range transaction only
 commits through whichever single process happens to lead every range it touches, which

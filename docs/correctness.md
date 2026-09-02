@@ -225,9 +225,12 @@ does *not* prove) lives — this section is a current index, not a replacement f
   validate the transaction's own prior reads are still current there
   (`Store.RefreshReads`), and only aborts if that validation actually fails
   (`TestPrepareRefreshesInsteadOfAbortingWhenPriorReadsStillHold`,
-  `TestPrepareAbortsWhenRefreshFindsAStaleRead`). Proven for the in-memory `Store`;
-  `DurableStore` still degrades to abort-and-retry, stated plainly rather than implied.
-  See `docs/notes/14-serializable.md`.
+  `TestPrepareAbortsWhenRefreshFindsAStaleRead`). Proven for both the in-memory `Store`
+  and the real, Raft-replicated `DurableStore`
+  (`TestDurableStorePrepareRefreshesInsteadOfAborting`,
+  `TestDurableStorePrepareAbortsWhenRefreshFindsAStaleRead`), the latter durably indexing
+  each key's last-committed-write timestamp the same way its existing read/intent
+  indexes work. See `docs/notes/14-serializable.md`.
 - **TLA+ now covers joint-consensus quorum intersection and recursive range splitting**,
   each checked by TLC with a required negative-control variant that must fail — proving
   the checker itself is discriminating, not just that the correct model happens to pass.

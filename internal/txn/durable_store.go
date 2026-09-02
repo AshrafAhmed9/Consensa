@@ -33,6 +33,7 @@ const (
 	intentPrefix    = "txn/intent/"
 	intentKeysIndex = "txn/intent-keys/"
 	readPrefix      = "txn/read/"
+	lastWritePrefix = "txn/lastwrite/"
 )
 
 // DurableStore is a Participant backed by a real Raft-replicated range instead of an
@@ -58,7 +59,11 @@ const (
 // already-recorded read on the same key -- the write-skew defense described in
 // docs/notes/14-serializable.md -- by durably persisting each key's high-water read mark
 // (readPrefix below) instead of holding it in an in-memory TimestampCache the way Store
-// does. This still is NOT full serializable snapshot isolation: no read-refresh, and (like
+// does. It also now implements read-refresh (PushedWriteTimestamp/RefreshReads below),
+// durably persisting each key's last-committed-write timestamp (lastWritePrefix) the same
+// way -- so a pushed transaction can commit at a later timestamp instead of always
+// aborting, over this real Raft-replicated path too, not just the in-memory Store. This
+// is still not full serializable snapshot isolation in every other respect: (like
 // WriteIntent's existing conflict check above) the read-then-write sequence in
 // checkNotBelowObservedRead/WriteIntent is not atomic with a concurrent RecordRead or
 // WriteIntent to the same key -- the same class of race this file's WriteIntent doc
@@ -119,22 +124,49 @@ func (d *DurableStore) Record(id string) (Record, bool) {
 	return record, true
 }
 
-// PushedWriteTimestamp and RefreshReads deliberately do NOT implement read-refresh for
-// DurableStore yet -- returning ts unchanged and false respectively means
-// Coordinator.Prepare's refresh attempt (see its own doc comment) always fails fast and
-// falls back to today's abort-and-retry behavior, exactly the same outcome as before this
-// primitive existed. Store (intent.go) proves the mechanism itself works; wiring the
-// durable equivalent needs a real per-key last-committed-write timestamp durably indexed
-// the same way readPrefix/intentKeysIndex are here, which is real, separate work -- see
-// docs/notes/14-serializable.md for the honest accounting of what's proven versus what's
-// still a documented gap.
-// PushedWriteTimestamp does not implement read-refresh for DurableStore yet -- see the
-// doc comment above.
-func (d *DurableStore) PushedWriteTimestamp(_ []byte, ts Timestamp) Timestamp { return ts }
+// PushedWriteTimestamp mirrors Store.PushedWriteTimestamp (intent.go) for the durable
+// path: a pure query of the durably recorded read high-water mark for key, computing the
+// same floor WriteIntent's own conflict check enforces, without recording anything. Used
+// by Coordinator.Prepare's read-refresh path (coordinator.go) to compute how far a whole
+// transaction's timestamp must move to clear every conflicting key at once.
+func (d *DurableStore) PushedWriteTimestamp(key []byte, ts Timestamp) Timestamp {
+	observed, ok := d.readTimestamp(key)
+	if !ok || observed.Compare(ts) < 0 {
+		return ts
+	}
+	return Timestamp{WallTime: observed.WallTime, Logical: observed.Logical + 1}
+}
 
-// RefreshReads does not implement read-refresh for DurableStore yet -- see the doc
-// comment above.
-func (d *DurableStore) RefreshReads(_ map[string]Timestamp, _ Timestamp) bool { return false }
+// RefreshReads implements the durable half of read-refresh (see Store.RefreshReads,
+// intent.go, for the full argument this mirrors): a key this transaction read is still
+// safe at the pushed timestamp iff no OTHER transaction's write committed to it in
+// (originalReadTS, newTS]. lastWriteTimestamp durably records exactly that per key,
+// written alongside the committed value itself in Resolve below -- the timestamp-overlap
+// proxy, not a value-equality check, for the same reason Store's own doc comment gives.
+func (d *DurableStore) RefreshReads(reads map[string]Timestamp, newTS Timestamp) bool {
+	for key, originalTS := range reads {
+		last, ok := d.lastWriteTimestamp([]byte(key))
+		if !ok {
+			continue
+		}
+		if last.Compare(originalTS) > 0 && last.Compare(newTS) <= 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (d *DurableStore) lastWriteTimestamp(key []byte) (Timestamp, bool) {
+	data, err := d.rng.Get([]byte(lastWritePrefix + string(key)))
+	if err != nil {
+		return Timestamp{}, false
+	}
+	var ts Timestamp
+	if err := json.Unmarshal(data, &ts); err != nil {
+		return Timestamp{}, false
+	}
+	return ts, true
+}
 
 // WriteIntent durably proposes a provisional key/value for a pending transaction, and
 // records the key in that transaction's intent-key index so Resolve can find it again --
@@ -205,6 +237,13 @@ func (d *DurableStore) Resolve(record Record) error {
 		}
 		if record.Status == Committed {
 			if err := d.putAndConfirm(key, intent.Value); err != nil {
+				return err
+			}
+			tsData, err := json.Marshal(record.WriteTimestamp)
+			if err != nil {
+				return err
+			}
+			if err := d.putAndConfirm([]byte(lastWritePrefix+string(key)), tsData); err != nil {
 				return err
 			}
 		}

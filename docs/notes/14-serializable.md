@@ -84,11 +84,20 @@ and Prepare still aborts -- refresh only papers over the "prove it's still safe"
 never the "just got lucky" case. This is deliberately a single attempt, not a retry
 loop -- see `Coordinator.Prepare`'s own doc comment for why.
 
-**What this still does not do, stated plainly:** `DurableStore` (the real,
-Raft-replicated `Participant`) does not implement read-refresh yet --
-`PushedWriteTimestamp`/`RefreshReads` are stubbed there to degrade safely back to
-today's abort-and-retry (see that file's own doc comment), because a durable
-last-committed-write-timestamp index needs the same kind of durable index
-`readPrefix`/`intentKeysIndex` already are for other pieces of this file, which is real,
-separate work. `Store` proves the mechanism is correct; wiring the durable equivalent is
-the next step, not done here.
+**Update: `DurableStore` now implements read-refresh too, over real Raft replication.**
+`PushedWriteTimestamp` mirrors `Store`'s pure-query check against the durably persisted
+read high-water mark; `RefreshReads` checks a new `lastWritePrefix` durable index --
+each key's last-*committed*-write timestamp, written in `Resolve` alongside the
+committed value itself, the same pattern `readPrefix`/`intentKeysIndex` already
+established. `TestDurableStorePrepareRefreshesInsteadOfAborting` and
+`TestDurableStorePrepareAbortsWhenRefreshFindsAStaleRead` reproduce the exact scenarios
+`TestPrepareRefreshesInsteadOfAbortingWhenPriorReadsStillHold`/
+`TestPrepareAbortsWhenRefreshFindsAStaleRead` prove against the in-memory `Store`, this
+time through `Coordinator.Prepare` against a real 3-node `kv.DurableRange` group.
+
+**What this still does not do, stated plainly:** the same non-atomicity this file's own
+`WriteIntent` doc comment already states for the intent-conflict and observed-read
+checks applies to `lastWriteTimestamp` too -- `kv.DurableRange` has no
+conditional/compare-and-swap Put to build a fully race-free version on. Refresh is still
+a single attempt, not a retry loop, matching `Coordinator.Prepare`'s own documented
+choice for both the in-memory and durable paths alike.
