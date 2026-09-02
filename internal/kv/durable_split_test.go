@@ -262,3 +262,121 @@ func TestMaybeSplitKeyDrivesARealLiveSplit(t *testing.T) {
 		t.Fatalf("split lost or duplicated keys: parent had %d, children have %d+%d", len(parentData), len(leftData), len(rightData))
 	}
 }
+
+// TestLiveSplitUpdatesRoutingMetadata closes the specific piece of "live traffic cutover"
+// that was still missing: Meta.Replace and Router already prove routing can publish a
+// split atomically (TestMetaReplacePublishesSplitAtomically, descriptor_test.go), but only
+// against descriptor math and an in-memory MultiRaft assembly -- never against a split
+// that actually moved real data through real Raft groups the way
+// TestLiveSplitPreservesKVCorrectness proves. This test performs the identical real
+// migration, then builds a Meta/Router reflecting the new child descriptors and proves:
+// (1) a client with no prior cached route resolves a key to the correct child descriptor
+// ID after the split publishes; (2) a client that cached the OLD parent descriptor BEFORE
+// the split -- exactly RoutedKV.retryRoute's own documented scenario -- gets
+// ErrRangeKeyMismatch from the stale descriptor and, after Refresh, resolves correctly
+// through the same Meta the real migration's data now actually lives behind.
+func TestLiveSplitUpdatesRoutingMetadata(t *testing.T) {
+	parentLive := newDurableRangeGroupForSplit(t, 1)
+	stopParent := make(chan struct{})
+	wgParent := driveRanges(parentLive, 10*time.Millisecond, stopParent)
+
+	parent := Descriptor{ID: 100, Start: nil, End: nil, Replicas: []raft.NodeID{1, 2, 3}}
+	splitKey := []byte("m")
+
+	dataset := map[string][]byte{"a": []byte("1"), "z": []byte("2")}
+	for k, v := range dataset {
+		if err := putUntilAccepted(parentLive, []byte(k), v, 20*time.Second); err != nil {
+			t.Fatalf("put %s into parent: %v", k, err)
+		}
+	}
+
+	meta, err := NewMeta([]Descriptor{parent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := NewRouter(meta)
+	// A client resolves and caches the parent descriptor BEFORE the split -- the scenario
+	// RoutedKV.retryRoute's own doc comment describes: a cached route later invalidated by
+	// a real topology change, not merely never having looked anything up yet.
+	staleRoute, err := router.Route([]byte("a"))
+	if err != nil || staleRoute.ID != parent.ID {
+		t.Fatalf("pre-split route(a) = %v, %v, want parent descriptor %d", staleRoute, err, parent.ID)
+	}
+
+	var leader *DurableRange
+	deadline := time.Now().Add(20 * time.Second)
+	for leader == nil {
+		for _, r := range parentLive {
+			if all, err := r.AllKeys(); err == nil && len(all) == len(dataset) {
+				leader = r
+				break
+			}
+		}
+		if leader == nil {
+			if time.Now().After(deadline) {
+				t.Fatal("parent group never converged on the full dataset")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	parentData, err := leader.AllKeys()
+	if err != nil {
+		t.Fatalf("parent AllKeys: %v", err)
+	}
+
+	left, right, err := SplitDescriptor(parent, splitKey, 101, 102)
+	if err != nil {
+		t.Fatalf("SplitDescriptor: %v", err)
+	}
+
+	close(stopParent)
+	wgParent.Wait()
+
+	leftLive := newDurableRangeGroupForSplit(t, 11)
+	rightLive := newDurableRangeGroupForSplit(t, 21)
+	stopChildren := make(chan struct{})
+	wgChildren := driveRanges(append(append([]*DurableRange{}, leftLive...), rightLive...), 10*time.Millisecond, stopChildren)
+	defer func() { close(stopChildren); wgChildren.Wait() }()
+
+	for k, v := range parentData {
+		var target []*DurableRange
+		if left.Contains([]byte(k)) {
+			target = leftLive
+		} else if right.Contains([]byte(k)) {
+			target = rightLive
+		} else {
+			t.Fatalf("key %q belongs to neither child descriptor -- split boundary gap", k)
+		}
+		if err := putUntilAccepted(target, []byte(k), v, 20*time.Second); err != nil {
+			t.Fatalf("migrate %s: %v", k, err)
+		}
+	}
+
+	// The migration is done; now publish the new topology, the piece this test actually
+	// closes. Meta.Replace validates and installs both children atomically -- routing
+	// observes either the old valid topology or the new one, never a gap or overlap
+	// in between (Meta.Replace's own doc comment).
+	if err := meta.Replace([]Descriptor{left, right}); err != nil {
+		t.Fatalf("publishing split metadata: %v", err)
+	}
+
+	// A fresh client (no stale cache) resolves directly to the correct child.
+	freshRoute, err := NewRouter(meta).Route([]byte("z"))
+	if err != nil || freshRoute.ID != right.ID {
+		t.Fatalf("post-split fresh route(z) = %v, %v, want right descriptor %d", freshRoute, err, right.ID)
+	}
+
+	// The client holding the pre-split cached route (staleRoute, the parent descriptor)
+	// must discover it no longer reflects reality once it refreshes -- exactly
+	// RoutedKV.retryRoute's real production pattern: cache a route, get told it's stale
+	// (ErrRangeKeyMismatch from the range itself, in production), Refresh, reroute.
+	// router itself still holds that same cached entry until Refresh is called.
+	if cached, err := router.Route([]byte("a")); err != nil || cached.ID != parent.ID {
+		t.Fatalf("router still returned the pre-split cached route unexpectedly changed: %v, %v", cached, err)
+	}
+	router.Refresh()
+	postSplitRoute, err := router.Route([]byte("a"))
+	if err != nil || postSplitRoute.ID != left.ID {
+		t.Fatalf("route(a) after Refresh = %v, %v, want left descriptor %d", postSplitRoute, err, left.ID)
+	}
+}

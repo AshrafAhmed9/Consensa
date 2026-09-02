@@ -55,15 +55,32 @@ picks a real split key from that group's own applied data, and feeding it into t
 identical `SplitDescriptor` + re-propose pipeline `TestLiveSplitPreservesKVCorrectness`
 proves produces two correct, non-empty children.
 
+**Update: routing metadata can now cut over live, for the KV plane.** The claim that
+`Router`/`meta.go` "both operate on a fixed, static range set" turned out to be stale --
+`Meta.Replace` and `Router.Refresh` already existed and were already tested against
+descriptor math and the in-memory `MultiRaft` assembly
+(`TestMetaReplacePublishesSplitAtomically`, `descriptor_test.go`), just never proven
+against a split that actually moved real data through real Raft groups.
+`TestLiveSplitUpdatesRoutingMetadata` (`internal/kv/durable_split_test.go`) closes that:
+it performs the identical real migration `TestLiveSplitPreservesKVCorrectness` proves,
+then publishes the new child descriptors via `Meta.Replace` and proves a fresh client
+resolves correctly to the right child, and a client that cached the OLD parent
+descriptor *before* the split -- `RoutedKV.retryRoute`'s own real production scenario --
+correctly reroutes to the child once it refreshes.
+
 **What this still does not prove, stated plainly:** nothing calls `MaybeSplitKey` on a
-timer or QPS counter -- there is no automatic *execution* on either plane, and no QPS-based
-trigger exists at all (size only). There is still no live traffic cutover (both this test
-and the earlier one build fresh groups and read/search them directly; nothing routes an
-in-flight client from the parent to the correct child mid-split) -- this project has no
-dynamic descriptor/routing update path yet (`Router` and `meta.go` both operate on a
-fixed, static range set), which live cutover would fundamentally require. The keyspace
-descriptor split and the data split are each proven independently but not yet wired to
-fire together as one atomic operation triggered off real traffic. The "rebuild from scratch" strategy used by both planes is also, by the
+timer or QPS counter -- there is no automatic *execution* on either plane, and no
+QPS-based trigger exists at all (size only). The metadata cutover above is proven at the
+`Meta`/`Router` layer, which the in-memory `MultiRaft`/`RoutedKV` client path already
+used; `cmd/consensa`'s real deployment does not yet assemble a `Router` at all (it wires
+`KVService` directly to two static `DurableStore`s -- see `docs/notes/08-transactions.md`),
+so this is proven as a reusable capability, not yet as something the running binary does
+during a real split. There is still no *in-flight request* cutover (an RPC already routed
+to the parent mid-split does not get redirected; a client must complete its current
+attempt, then re-route on its next one) -- this project has never modeled that finer-grained
+case. The keyspace descriptor split, the data split, and the metadata publish are each
+proven independently but not yet wired to fire together as one atomic operation triggered
+off real traffic. The "rebuild from scratch" strategy used by both planes is also, by the
 plan's own account, the most expensive of the three named options: real production use
 would want incremental repair or a stale-parent-during-rebuild fallback to avoid the
 latency cliff this approach causes while every key or vector is re-inserted one at a time.

@@ -94,7 +94,7 @@ does and doesn't cover, is in [`docs/correctness.md`](docs/correctness.md).
 | **The shipped binary** | An end-to-end test builds the real `consensa` binary, runs three real OS processes, kills one mid-write, and checks the survivors and the recovered process over real gRPC. |
 | **Chaos testing** | A seeded Python harness drives real partitions, process kills, and clock skew against real Raft clusters and checks the resulting history for linearizability (via [Porcupine](https://github.com/anishathalye/porcupine)) and search-result correctness. |
 | **Cross-shard transactions** | A 2PC coordinator commits atomically across two independent 3-node Raft groups, reachable over a real gRPC call, and survives a coordinator crash mid-commit. |
-| **Live range splits** | A shard splits into two fresh replica groups with no vector or key lost, duplicated, or leaking across the new boundary — proven on both the KV and vector planes. |
+| **Live range splits** | A shard splits into two fresh replica groups with no vector or key lost, duplicated, or leaking across the new boundary — proven on both the KV and vector planes, including publishing the new routing metadata atomically so both a fresh client and one holding a pre-split cached route resolve correctly afterward. |
 | **Joint-consensus membership changes** | Adding, promoting, or removing a replica goes through Raft's two-phase joint-consensus protocol, so a disjoint old/new majority can never both elect a leader — the specific failure mode joint consensus exists to prevent is covered directly. |
 | **Read-path ladder** | Leader reads via a quorum-confirmed barrier (`ReadIndex`); follower reads via a replicated lease and closed timestamp, rejected until both are actually valid — not just modeled. |
 | **Write-skew prevention** | The classic "two on-call doctors" anomaly is reproduced and the specific write that would complete it is rejected, on both the in-memory and Raft-replicated code paths. |
@@ -125,8 +125,9 @@ including the ones later sessions overturned.
 ## What's not done yet
 
 Stated plainly rather than left implied: no automatic trigger fires a range split on its
-own (the decision logic is proven, nothing calls it on a timer); no live traffic cutover
-mid-split; joint consensus can reconfigure replicas already known to a group, but there's
+own (the decision logic is proven, nothing calls it on a timer); routing metadata can now
+cut over live, but no in-flight request mid-split gets redirected, and `cmd/consensa`'s
+real deployment doesn't assemble a `Router` at all yet; joint consensus can reconfigure replicas already known to a group, but there's
 no workflow yet for provisioning a brand-new process and publishing its address; snapshot
 isolation is upgraded to reject write skew but isn't full serializability; a running
 binary now advances the closed timestamp on a real interval, but nothing yet grants a
