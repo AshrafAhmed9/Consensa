@@ -128,7 +128,12 @@ func (d *DurableStore) Record(id string) (Record, bool) {
 // the same way readPrefix/intentKeysIndex are here, which is real, separate work -- see
 // docs/notes/14-serializable.md for the honest accounting of what's proven versus what's
 // still a documented gap.
+// PushedWriteTimestamp does not implement read-refresh for DurableStore yet -- see the
+// doc comment above.
 func (d *DurableStore) PushedWriteTimestamp(_ []byte, ts Timestamp) Timestamp { return ts }
+
+// RefreshReads does not implement read-refresh for DurableStore yet -- see the doc
+// comment above.
 func (d *DurableStore) RefreshReads(_ map[string]Timestamp, _ Timestamp) bool { return false }
 
 // WriteIntent durably proposes a provisional key/value for a pending transaction, and
