@@ -95,9 +95,19 @@ up over real replication, and is promoted to a full voter.
 
 **What this still does not do, stated plainly:** any valid admin token authorizes both
 `AddReplica` and `PromoteReplica` equally -- there is no finer-grained, per-method scoping
-within this one service. Bootstrap (how a fresh process learns which group to even try
-joining, i.e. discovering `AddReplica`'s own address to call it) and range-routing
-updates after a membership change remain separate, undone work.
+within this one service. Range-routing updates after a membership change remain separate,
+undone work.
+
+**Update: `consensa-cli join` automates the operator side.** The sequence above --
+`AddReplica` against every existing replica, then `PromoteReplica` retried against
+whichever one currently leads -- previously had to be scripted by hand, one gRPC call at
+a time. `cmd/consensa-cli`'s `join` subcommand (`consensa-cli join --range-id ...
+--new-id ... --new-addr ... --existing 1=host:port,2=host:port,...`) drives exactly that
+sequence against real `ConsensaAdmin` servers, proven end to end by
+`TestJoinAddsAndPromotesReplicaOverRealProcess` against real OS processes and real TCP.
+It still does not do service discovery -- the operator supplies every existing replica's
+admin address explicitly, the same way `--peers` is supplied to `cmd/consensa` itself --
+and it operates on one named range at a time, not "join the whole deployment" in one call.
 
 A real bug was found and fixed while proving this, caught by real CI (not local, not by
 inspection): `AddKnownPeer` originally only appended to `n.peers`, but a currently-leading

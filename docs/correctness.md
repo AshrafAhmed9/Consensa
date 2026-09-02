@@ -230,10 +230,16 @@ does *not* prove) lives — this section is a current index, not a replacement f
   bearer-token interceptor (off by default; see `docs/notes/13-auth.md`), and unlike the
   data-plane RPCs, independently scoped: `--admin-auth-token` requires a separate
   credential from `--auth-token`, so a leaked data-plane token cannot drive membership
-  changes (`TestConsensaBinaryScopesAdminTokenIndependently`). Still unbuilt: per-method
+  changes (`TestConsensaBinaryScopesAdminTokenIndependently`). `cmd/consensa-cli join`
+  now automates the operator's side of this sequence (`AddReplica` against every existing
+  replica, then `PromoteReplica` retried against whichever one leads) against real
+  `ConsensaAdmin` servers, proven by `TestJoinAddsAndPromotesReplicaOverRealProcess`
+  against real OS processes and real TCP -- the operator still supplies every existing
+  replica's address explicitly, and it joins one named range at a time; genuine service
+  discovery (DNS, gossip, a registry) remains unbuilt. Still unbuilt: per-method
   scoping within one service (a valid admin token authorizes both `AddReplica` and
-  `PromoteReplica` equally), bootstrap discovery of which address to call, and updating
-  client routing after a membership change. See `docs/adr/010-learners.md`.
+  `PromoteReplica` equally) and updating client routing after a membership change.
+  See `docs/adr/010-learners.md`.
   A real performance regression was found and fixed while closing this: recomputing
   membership from the full log on every heartbeat and every proposed write (not just
   actual config changes) was cheap in unit tests but measurably destabilized leadership
