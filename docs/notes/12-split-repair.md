@@ -68,9 +68,21 @@ resolves correctly to the right child, and a client that cached the OLD parent
 descriptor *before* the split -- `RoutedKV.retryRoute`'s own real production scenario --
 correctly reroutes to the child once it refreshes.
 
-**What this still does not prove, stated plainly:** nothing calls `MaybeSplitKey` on a
-timer or QPS counter -- there is no automatic *execution* on either plane, and no
-QPS-based trigger exists at all (size only). `cmd/consensa` does already assemble a real
+**Update: `cmd/consensa` now checks the split-trigger decision on a real interval.**
+`checkSplitRecommendations` runs `MaybeSplitKey` against both KV ranges every
+`--split-check-interval` (default 5s) and exposes the result as a real Prometheus gauge,
+`consensa_kv_split_recommended{range_id}` -- `TestCheckSplitRecommendationsSetsGaugeAboveThreshold`
+proves it tracks a real 3-node group's real applied data. Deliberately its own goroutine,
+not folded into the Raft tick loop the way closed-timestamp advancement was: `AllKeys`
+never calls `Host.Propose`, so it can't reintroduce the same-mutex contention that made a
+second Propose-calling goroutine unsafe there, and checking it off the tick loop entirely
+keeps a large range's full-scan cost from ever delaying real-time Raft ticking.
+
+**What this still does not prove, stated plainly:** this is the decision, checked and
+observable, but there is still no automatic *execution* on either plane, and no QPS-based
+trigger exists at all (size only). A live split still needs fresh child Raft groups stood
+up at runtime -- new listeners, storage directories, IDs -- which is real, separate
+orchestration work no running binary attempts. `cmd/consensa` does already assemble a real
 `kv.Meta`/`kv.Router` for its two static ranges and passes it to `KVService`
 (`main.go`) -- corrected here after an earlier version of this note claimed otherwise --
 but nothing in the running binary ever calls `Meta.Replace` on it: the `Router` this test

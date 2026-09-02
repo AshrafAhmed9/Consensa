@@ -99,7 +99,7 @@ does and doesn't cover, is in [`docs/correctness.md`](docs/correctness.md).
 | **Read-path ladder** | Leader reads via a quorum-confirmed barrier (`ReadIndex`); follower reads via a replicated lease and closed timestamp, rejected until both are actually valid — not just modeled. |
 | **Write-skew prevention** | The classic "two on-call doctors" anomaly is reproduced and the specific write that would complete it is rejected, on both the in-memory and Raft-replicated code paths. |
 | **Formal verification** | TLA+ models of joint-consensus quorum intersection and recursive range splitting, model-checked by TLC — each with a deliberately broken variant that must fail, so the checker itself is proven discriminating. |
-| **Observability** | Real Prometheus metrics (Raft term, QPS, recall) from a live process, rendered on an auto-provisioned Grafana dashboard, recall computed by an external client against an independent ground truth. |
+| **Observability** | Real Prometheus metrics (Raft term, QPS, recall, and now the split-trigger recommendation) from a live process, rendered on an auto-provisioned Grafana dashboard, recall computed by an external client against an independent ground truth. |
 
 `docs/bugs/` has a write-up for every real bug the test suite or chaos harness actually
 found — root cause, fix, seed, regression test. `docs/adr/` records the design decisions,
@@ -124,11 +124,13 @@ including the ones later sessions overturned.
 
 ## What's not done yet
 
-Stated plainly rather than left implied: no automatic trigger fires a range split on its
-own (the decision logic is proven, nothing calls it on a timer); routing metadata can now
-cut over live and `cmd/consensa` already assembles a real `Router` for its two static
-ranges, but nothing in the running binary ever triggers a real split against it, and no
-in-flight request mid-split gets redirected; joint consensus can reconfigure replicas already known to a group, but there's
+Stated plainly rather than left implied: `cmd/consensa` now checks the split-trigger
+decision on a real interval and exposes it as a metric, but nothing *executes* a split
+automatically (a live split needs fresh child Raft groups stood up at runtime, real,
+separate orchestration work); routing metadata can now cut over live and `cmd/consensa`
+already assembles a real `Router` for its two static ranges, but nothing in the running
+binary ever triggers a real split against it, and no in-flight request mid-split gets
+redirected; joint consensus can reconfigure replicas already known to a group, but there's
 no workflow yet for provisioning a brand-new process and publishing its address; snapshot
 isolation is upgraded to reject write skew but isn't full serializability; a running
 binary now advances the closed timestamp on a real interval, but nothing yet grants a
