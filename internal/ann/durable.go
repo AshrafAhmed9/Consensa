@@ -185,6 +185,31 @@ func (d *DurableNode) AllVectors() map[string]vector.Vector {
 	return d.index.AllVectors()
 }
 
+// Snapshot returns this replica's own graph in canonical byte form -- the same
+// representation persist.go's Snapshot/Restore already use for recovery, reused here as
+// the payload a "repair" mutation carries so a fresh child group can be seeded from the
+// parent's actual graph structure in one Raft entry, instead of losing it and rebuilding
+// node-by-node. See ProposeRepair and execute_split.go's ExecuteLiveSplitByRepair.
+func (d *DurableNode) Snapshot() ([]byte, error) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.index.Snapshot()
+}
+
+// ProposeRepair proposes a single deterministic "restore parent graph, then repair to
+// [start, end)" mutation -- see persist.go's "repair" operation and HNSW.Repair's own
+// doc comment on why every replica computes a bit-identical result independently from
+// the identical committed entry, without needing the resulting graph bytes to be
+// replicated themselves. Same leader-only contract as Insert/Delete.
+func (d *DurableNode) ProposeRepair(parentSnapshot []byte, start, end string) error {
+	d.requestCount.Add(1)
+	data, err := EncodeRepairMutation(parentSnapshot, start, end)
+	if err != nil {
+		return err
+	}
+	return d.host.Propose(data)
+}
+
 // MaybeSplitKey wires ShouldSplit to this replica's own applied state, mirroring
 // kv.DurableRange.MaybeSplitKey exactly. The error return exists for interface symmetry
 // with the KV version (executeSplitTarget-shaped callers in cmd/consensa expect it) even

@@ -201,15 +201,25 @@ does *not* prove) lives — this section is a current index, not a replacement f
   quantifies the gap `ann.ShouldSplit`'s own doc comment already flagged: with a dataset
   where vector IDs are independent of cluster membership (the realistic case — real
   primary keys are not correlated with embedding-space position), recall@10 drops from
-  0.998 pre-split to 0.622 post-split (37.7% relative) under today's ID-lexicographic
-  boundary and rebuild-from-scratch child construction. `docs/adr/011-vector-split-boundary.md`
-  records this measurement and the decision it confirms: rebuild-from-scratch stays the
-  correct interim strategy (it is the only one of PLAN.md's three options with an
-  already-solved Raft-replication story), while a clustering-aware boundary plus
-  replicated incremental repair remains real, unimplemented future work — the mechanism
-  for in-memory repair already exists (`HNSW.Repair`), but making its output replicate
-  deterministically across a live Raft group is a separate, correctness-critical design
-  problem this measurement does not attempt to solve.
+  0.998 pre-split to 0.622 post-split (37.7% relative) under the ID-lexicographic
+  boundary. `docs/adr/011-vector-split-boundary.md` records this measurement.
+- **Replicated incremental repair now closes the design gap ADR-011 deferred.**
+  `docs/adr/012-replicated-incremental-repair.md`: the vector plane's live split path
+  (`ann.ExecuteLiveSplitByRepair`, used by `cmd/consensa`'s `executeAnnSplitIfRecommended`
+  in place of the rebuild-via-reinsert `ExecuteLiveSplit`) now proposes exactly ONE
+  Raft-committed `"repair"` mutation per child — carrying the parent's own graph
+  snapshot — instead of one `Insert` per vector. Every replica of the child group applies
+  it independently and converges on a **bit-identical** graph
+  (`TestExecuteLiveSplitByRepairMigratesRealVectors`'s `reflect.DeepEqual` check across
+  all three replicas), which only holds because `HNSW.Repair` is now provably pure: a
+  real latent nondeterminism in its entry-point tie-break (Go map iteration order) was
+  found and fixed as part of proving this, and `Repair` gained a backfill pass (search for
+  replacement neighbors, not just drop stale ones) after measuring that repair-without-
+  backfill was actually WORSE than rebuild (0.396 vs. 0.622 recall) —
+  `TestMeasureRecallRepairVsRebuildAcrossRealisticIDSplit` shows backfilled repair at
+  0.592, within 5% of rebuild's recall while replicating in `O(1)` Raft entries instead of
+  `O(n)`. The split *boundary* itself (ID-lexicographic, not clustering-aware) is
+  unchanged and remains the real, still-open gap ADR-011 identified.
 - **Multi-range outbound connections are pooled.** Ranges on one node sharing a
   destination reuse one persistent TCP connection instead of dialing per message
   (`TestMultiplexedTransportPoolsOutboundConnections`). Making the receiving side read

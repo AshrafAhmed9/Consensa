@@ -13,6 +13,12 @@ type Mutation struct {
 	Operation string        `json:"operation"`
 	ID        string        `json:"id"`
 	Vector    vector.Vector `json:"vector,omitempty"`
+	// Snapshot, Start, and End carry a "repair" operation's payload: the parent graph's
+	// own canonical bytes (Snapshot's output), plus the [Start, End) bounds this replica
+	// keeps. See EncodeRepairMutation.
+	Snapshot []byte `json:"snapshot,omitempty"`
+	Start    string `json:"start,omitempty"`
+	End      string `json:"end,omitempty"`
 }
 
 // EncodeMutation serializes a validated insertion for a Raft log entry.
@@ -25,7 +31,29 @@ func EncodeDeleteMutation(id string) ([]byte, error) {
 	return json.Marshal(Mutation{Operation: "delete", ID: id})
 }
 
+// EncodeRepairMutation serializes a "restore then repair" operation: the payload a fresh
+// child range's leader proposes exactly once during a split, carrying the PARENT's own
+// graph bytes (not just the vectors that belong to this child) so every replica can
+// independently restore the full parent structure and then prune it down to [start, end)
+// -- preserving the parent graph's existing edges among retained nodes, rather than losing
+// them and rebuilding node-by-node the way ExecuteLiveSplit's insert-based rebuild does.
+// See ExecuteLiveSplitByRepair (execute_split.go) and docs/adr/012-replicated-incremental-repair.md.
+func EncodeRepairMutation(parentSnapshot []byte, start, end string) ([]byte, error) {
+	if len(parentSnapshot) == 0 {
+		return nil, errors.New("ann: repair mutation requires a non-empty parent snapshot")
+	}
+	return json.Marshal(Mutation{Operation: "repair", Snapshot: parentSnapshot, Start: start, End: end})
+}
+
 // ApplyMutation decodes and applies one Raft-ordered graph mutation.
+//
+// "repair" is deterministic across replicas -- and therefore safe to apply
+// independently on each one, from the identical committed bytes, without the resulting
+// graph itself needing to be replicated -- because Restore is a pure function of its
+// input bytes and HNSW.Repair is a pure function of (graph, keep predicate) with no
+// randomness of its own (see Repair's own doc comment on the entry-point tie-break fix
+// that made this true). Both facts must keep holding for every replica to converge on a
+// bit-identical graph from this one entry.
 func (h *HNSW) ApplyMutation(data []byte) error {
 	var m Mutation
 	if err := json.Unmarshal(data, &m); err != nil {
@@ -36,6 +64,13 @@ func (h *HNSW) ApplyMutation(data []byte) error {
 		return h.Insert(m.ID, m.Vector)
 	case "delete":
 		return h.Delete(m.ID)
+	case "repair":
+		if err := h.Restore(m.Snapshot); err != nil {
+			return err
+		}
+		start, end := m.Start, m.End
+		h.Repair(func(id string) bool { return id >= start && (end == "" || id < end) })
+		return nil
 	default:
 		return errors.New("ann: unknown graph mutation")
 	}

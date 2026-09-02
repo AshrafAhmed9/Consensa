@@ -83,6 +83,74 @@ func insertAndConfirm(target splitTarget, id string, v vector.Vector, perKeyTime
 	}
 }
 
+// repairTarget is the subset of *DurableNode ExecuteLiveSplitByRepair needs from each
+// child, declared narrowly like splitTarget above.
+type repairTarget interface {
+	ProposeRepair(parentSnapshot []byte, start, end string) error
+	AllVectors() map[string]vector.Vector
+}
+
+// ExecuteLiveSplitByRepair is ExecuteLiveSplit's incremental-repair counterpart: instead
+// of re-proposing every vector as its own Insert (losing the parent graph's existing edge
+// structure and rebuilding node-by-node), it proposes ONE "repair" mutation per child,
+// carrying the parent's own graph bytes (parentSnapshot). Every replica of the fresh
+// child group independently restores that full parent graph, then prunes it down to its
+// own [Start, End) -- see persist.go's ApplyMutation "repair" case and its doc comment
+// for exactly why this is safe to compute independently per replica rather than needing
+// the resulting graph itself replicated.
+//
+// docs/adr/012-replicated-incremental-repair.md records why this is now the strategy
+// used, over ExecuteLiveSplit's rebuild-via-reinsert (kept, not removed: still correct,
+// and still what a caller without a recent parent snapshot must fall back to).
+func ExecuteLiveSplitByRepair(parentDescriptor Descriptor, parentSnapshot []byte, parentVectors map[string]vector.Vector, splitKey string, leftID, rightID uint64, left, right repairTarget, timeout time.Duration) (leftDescriptor, rightDescriptor Descriptor, err error) {
+	leftDescriptor, rightDescriptor, err = SplitDescriptor(parentDescriptor, splitKey, leftID, rightID)
+	if err != nil {
+		return Descriptor{}, Descriptor{}, err
+	}
+	expectedLeft, expectedRight := 0, 0
+	for id := range parentVectors {
+		if leftDescriptor.Contains(id) {
+			expectedLeft++
+		} else if rightDescriptor.Contains(id) {
+			expectedRight++
+		} else {
+			return Descriptor{}, Descriptor{}, fmt.Errorf("ann: vector %q belongs to neither child descriptor -- split boundary gap", id)
+		}
+	}
+	if err := proposeRepairAndConfirm(left, parentSnapshot, leftDescriptor.Start, leftDescriptor.End, expectedLeft, timeout); err != nil {
+		return Descriptor{}, Descriptor{}, fmt.Errorf("repairing left child: %w", err)
+	}
+	if err := proposeRepairAndConfirm(right, parentSnapshot, rightDescriptor.Start, rightDescriptor.End, expectedRight, timeout); err != nil {
+		return Descriptor{}, Descriptor{}, fmt.Errorf("repairing right child: %w", err)
+	}
+	return leftDescriptor, rightDescriptor, nil
+}
+
+// proposeRepairAndConfirm retries ProposeRepair past "not leader" errors until target's
+// own applied vector count matches expectedCount -- the repair equivalent of
+// insertAndConfirm's "check visibility every iteration, not only after local success"
+// pattern, for the identical reason: only whichever process is actually leader can make
+// ProposeRepair succeed locally, but the entry still replicates to every other replica.
+func proposeRepairAndConfirm(target repairTarget, parentSnapshot []byte, start, end string, expectedCount int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		if err := target.ProposeRepair(parentSnapshot, start, end); err != nil {
+			lastErr = err
+		}
+		if len(target.AllVectors()) == expectedCount {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			if lastErr != nil {
+				return lastErr
+			}
+			return fmt.Errorf("ann: repair did not become visible before the deadline (want %d vectors)", expectedCount)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // bytesEqualVector compares two vectors element-wise -- vector.Vector has no exported
 // equality method, and this must be an exact-value check (not a distance threshold):
 // insertAndConfirm needs to know THIS EXACT insert landed, not merely that some

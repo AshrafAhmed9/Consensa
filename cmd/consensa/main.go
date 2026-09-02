@@ -325,17 +325,21 @@ func executeSplitIfRecommended(
 type annExecuteSplitTarget interface {
 	MaybeSplitKey(sizeThreshold int, qps, qpsThreshold float64) (string, bool, error)
 	AllVectors() map[string]vector.Vector
+	Snapshot() ([]byte, error)
 }
 
 // executeAnnSplitIfRecommended is executeSplitIfRecommended's vector-plane counterpart --
 // same structure, same reasoning (every process runs the identical check against
 // identical Raft-replicated applied state, so no cross-process coordination call is
-// needed to decide WHEN to split), built on ann.ExecuteLiveSplit instead of
-// kv.ExecuteLiveSplit. See ann.ShouldSplit's own doc comment for the one real limitation
-// this inherits: the split boundary is a lexicographic ID bisection, not a clustering-
-// aware vector-space boundary, so recall near that boundary can dip until each child's own
-// graph structure compensates -- deliberately the minimum viable decision proving
-// automatic execution works end-to-end, not PLAN.md's Phase 10 answer to HNSW-under-splits.
+// needed to decide WHEN to split), built on ann.ExecuteLiveSplitByRepair instead of
+// kv.ExecuteLiveSplit: one "repair" Raft entry per child (parent snapshot + boundary)
+// rather than O(n) individual inserts, letting each child's graph keep the parent's
+// existing edges among retained nodes instead of losing them to a from-scratch rebuild.
+// See docs/adr/012-replicated-incremental-repair.md for the measured recall comparison
+// that motivated this. See ann.ShouldSplit's own doc comment for the one real limitation
+// this still inherits: the split boundary itself is a lexicographic ID bisection, not a
+// clustering-aware vector-space boundary -- a real, separate, unimplemented gap this
+// change does not close (docs/adr/011-vector-split-boundary.md).
 //
 // leftID/rightID use *100, not KV's *10, so a vector-plane split's transport-multiplexed
 // range IDs (registered on the SAME shared MultiplexedTransport the KV ranges and their
@@ -362,6 +366,11 @@ func executeAnnSplitIfRecommended(
 		return
 	}
 	parentVectors := parent.AllVectors()
+	parentSnapshot, err := parent.Snapshot()
+	if err != nil {
+		slog.Error("live split: reading parent snapshot failed, will retry next tick", "plane", "vector", "range_id", parentID, "error", err)
+		return
+	}
 
 	leftID, rightID := parentID*100+1, parentID*100+2
 	if !attemptStarted {
@@ -376,7 +385,7 @@ func executeAnnSplitIfRecommended(
 	}
 	left, right := children[0], children[1]
 
-	leftDesc, rightDesc, err := ann.ExecuteLiveSplit(parentDescriptor, parentVectors, splitKey, leftID, rightID, left, right, 2*time.Second)
+	leftDesc, rightDesc, err := ann.ExecuteLiveSplitByRepair(parentDescriptor, parentSnapshot, parentVectors, splitKey, leftID, rightID, left, right, 2*time.Second)
 	if err != nil {
 		slog.Error("live split: migration failed, will retry against the same child ranges next tick", "plane", "vector", "range_id", parentID, "error", err)
 		return

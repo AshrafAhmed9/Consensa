@@ -127,13 +127,17 @@ including the ones later sessions overturned.
 Stated plainly rather than left implied: `cmd/consensa` now automatically executes a live
 split on both planes -- standing up fresh child Raft groups at runtime on the same shared
 transport, migrating data, and cutting real traffic over -- once each plane's own
-split-trigger decision recommends one (`kv.ExecuteLiveSplit`/`ann.ExecuteLiveSplit`,
+split-trigger decision recommends one (`kv.ExecuteLiveSplit`/`ann.ExecuteLiveSplitByRepair`,
 `TestConsensaBinaryExecutesALiveSplitAutomatically`/`TestConsensaBinaryExecutesALiveVectorSplitAutomatically`).
 The vector plane's split boundary is a lexicographic ID bisection, not a clustering-aware
-vector-space boundary, so recall near that boundary can dip until each child's own graph
-structure compensates -- the minimum viable decision proving automatic execution works
-end-to-end, not PLAN.md's own named answer to HNSW-under-splits (incremental repair or a
-stale-parent fallback), which remains real, unimplemented future work. There is still no
+vector-space boundary -- measured to cost 37.7% relative recall right after a split
+(`docs/adr/011-vector-split-boundary.md`). Each child's graph is now seeded by a single
+replicated, deterministic repair of the parent's own graph (drop cross-boundary edges,
+then backfill replacement neighbors so pruned nodes aren't left under-connected) instead
+of a from-scratch rebuild -- measured at recall parity with rebuild (within 5% relative)
+while replicating in one Raft entry per child instead of one per vector
+(`docs/adr/012-replicated-incremental-repair.md`). The boundary choice itself is
+unchanged and remains real, unimplemented future work. There is still no
 in-flight request cutover (an RPC already routed to the parent mid-split completes there;
 a client re-routes on its next call). The split trigger is no longer size-only: both
 planes now also support a QPS threshold (`--split-qps-threshold`, off by default), so a

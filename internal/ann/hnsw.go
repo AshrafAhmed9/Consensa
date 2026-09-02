@@ -236,10 +236,56 @@ func (h *HNSW) Repair(keep func(id string) bool) {
 			h.trim(n, level)
 		}
 	}
+	// Backfill: dropping cross-boundary neighbors above leaves nodes near the old boundary
+	// under-connected, which measurably hurts recall more than a full rebuild would (a
+	// rebuilt child gives every node a fresh, full-M neighbor list; a merely-pruned one
+	// does not) -- see docs/adr/012-replicated-incremental-repair.md's measurement. This is
+	// the "re-run neighbor selection on the affected nodes" half of PLAN.md's own
+	// incremental-repair description, which the filter/trim pass above does not do on its
+	// own: it can only ever shrink a neighbor list, never search for replacements. Iterate
+	// nodes in sorted ID order (not map order) for the same cross-replica determinism
+	// reason as the entry re-pick below.
+	sortedIDs := make([]string, 0, len(h.nodes))
+	for id := range h.nodes {
+		sortedIDs = append(sortedIDs, id)
+	}
+	sort.Strings(sortedIDs)
+	for _, id := range sortedIDs {
+		n := h.nodes[id]
+		for level := 0; level <= n.level; level++ {
+			need := h.cfg.M - len(n.neighbors[level])
+			if need <= 0 {
+				continue
+			}
+			exclude := map[string]bool{n.id: true}
+			for _, existing := range n.neighbors[level] {
+				exclude[existing] = true
+			}
+			candidates := h.closestNotIn(n.v, level, h.cfg.EFConstruction, exclude)
+			for _, other := range h.selectDiverse(n.v, candidates, need) {
+				n.neighbors[level] = append(n.neighbors[level], other.ID)
+				o := h.nodes[other.ID]
+				o.neighbors[level] = append(o.neighbors[level], id)
+				h.trim(o, level)
+			}
+		}
+	}
 	if _, ok := h.nodes[h.entry]; !ok {
 		h.entry, h.maxLevel = "", -1
-		for id, n := range h.nodes {
-			if n.level > h.maxLevel {
+		// Iterate in a fixed order (not Go's randomized map order) and break ties on the
+		// lowest ID: Repair must be a pure function of (graph, keep) so every replica of a
+		// live Raft group that applies the identical repair independently (persist.go's
+		// "repair" mutation) computes a bit-identical entry point. Two nodes tied for
+		// maxLevel are common after a split prunes half the graph, and map iteration order
+		// differs per process/run, so this was a real latent nondeterminism before any
+		// caller actually needed cross-replica determinism from Repair.
+		ids := make([]string, 0, len(h.nodes))
+		for id := range h.nodes {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			if n := h.nodes[id]; n.level > h.maxLevel {
 				h.entry, h.maxLevel = id, n.level
 			}
 		}
@@ -260,6 +306,23 @@ func (h *HNSW) closestExcept(q vector.Vector, l, limit int, exclude string) []Re
 	rs := make([]Result, 0)
 	for id, n := range h.nodes {
 		if id != exclude && n.level >= l {
+			rs = append(rs, Result{ID: id, Distance: vector.L2Squared(q, n.v)})
+		}
+	}
+	sortResults(rs)
+	if len(rs) > limit {
+		rs = rs[:limit]
+	}
+	return rs
+}
+
+// closestNotIn is closestExcept's multi-ID counterpart, used by Repair's backfill pass to
+// search for replacement neighbors while skipping a node's own already-kept ones (not just
+// itself).
+func (h *HNSW) closestNotIn(q vector.Vector, l, limit int, exclude map[string]bool) []Result {
+	rs := make([]Result, 0)
+	for id, n := range h.nodes {
+		if !exclude[id] && n.level >= l {
 			rs = append(rs, Result{ID: id, Distance: vector.L2Squared(q, n.v)})
 		}
 	}
