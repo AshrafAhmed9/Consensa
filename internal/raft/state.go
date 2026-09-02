@@ -45,8 +45,9 @@ type Snapshot struct {
 // MessageType enumerates Raft RPCs plus local proposal messages.
 type MessageType uint8
 
-// MsgPreVote through MsgSnapshot are MessageType's values: the pre-vote and real-vote
-// request/response pairs, log replication and its response, and snapshot installation.
+// MsgPreVote through MsgTimeoutNow are MessageType's values: the pre-vote and real-vote
+// request/response pairs, log replication and its response, snapshot installation, and a
+// leader-initiated transfer nudge.
 const (
 	MsgPreVote MessageType = iota
 	MsgPreVoteResp
@@ -55,6 +56,14 @@ const (
 	MsgAppend
 	MsgAppendResp
 	MsgSnapshot
+	// MsgTimeoutNow is sent only by a leader that already holds this term's leadership and
+	// has confirmed the recipient's log is fully caught up (see node.TransferLeadershipTo).
+	// Unlike a normal election timeout, the recipient skips pre-vote and calls
+	// startElection directly: the sender, being current leader, has already done the
+	// safety check pre-vote exists to do (would this election actually be viable), so
+	// repeating it here would only add a needless round trip to what should be a fast
+	// handoff.
+	MsgTimeoutNow
 )
 
 // Message is a wire-independent Raft RPC. Its slice fields are copied on receipt so the

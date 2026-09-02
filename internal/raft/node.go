@@ -41,6 +41,21 @@ type Node interface {
 	// Status reports this replica's own view of its role and term, for administrative
 	// and diagnostic surfaces. It is read-only and never changes protocol behavior.
 	Status() (Role, uint64)
+	// Leader reports the NodeID this replica currently believes leads the group, or 0 if
+	// unknown (never yet heard from a leader, or a follower whose term just advanced past
+	// an election with no winner seen yet). Like Status, this is a local, possibly-stale
+	// view, useful for diagnostics and for deciding whom to ask for a leadership transfer
+	// -- never a substitute for Raft's own leader-confirmation inside a request/response.
+	Leader() NodeID
+	// TransferLeadershipTo asks this replica, which must currently be leader, to hand
+	// leadership to a specific voting peer whose log is already fully caught up. It
+	// returns an error without sending anything if this replica isn't leader or if the
+	// transferee's replicated log isn't yet at this leader's last index -- sending
+	// MsgTimeoutNow to a peer that isn't caught up would let it win an election and then
+	// be unable to construct entries this leader already committed, which Raft's
+	// leader-completeness property forbids. The caller is expected to retry once
+	// replication catches the transferee up, exactly like an ordinary Propose retry.
+	TransferLeadershipTo(to NodeID) error
 	// ConfState returns the membership that must accompany any snapshot created from this
 	// replica. A snapshot without it cannot safely replace the configuration entries in
 	// the compacted log prefix.
@@ -195,6 +210,8 @@ func (n *node) Step(m Message) error {
 		n.handleAppendResp(m)
 	case MsgSnapshot:
 		n.handleSnapshot(m)
+	case MsgTimeoutNow:
+		n.handleTimeoutNow(m)
 	default:
 		return errors.New("raft: unknown message")
 	}
@@ -218,6 +235,23 @@ func (n *node) Advance() {
 }
 
 func (n *node) Status() (Role, uint64) { return n.role, n.term }
+func (n *node) Leader() NodeID         { return NodeID(n.leader) }
+func (n *node) TransferLeadershipTo(to NodeID) error {
+	if n.role != Leader {
+		return errors.New("raft: leadership transfer requires leader")
+	}
+	if to == n.id {
+		return errors.New("raft: cannot transfer leadership to self")
+	}
+	if !n.isVoter(to) {
+		return errors.New("raft: transfer target is not a voter")
+	}
+	if n.match[to] < n.log.lastIndex() {
+		return errors.New("raft: transfer target has not caught up to the leader's log")
+	}
+	n.send(Message{Type: MsgTimeoutNow, To: to, Term: n.term})
+	return nil
+}
 func (n *node) ConfState() ConfState   { return confStateFromMembership(n.membership) }
 func (n *node) send(m Message)         { m.From = n.id; n.msgs = append(n.msgs, m) }
 func (n *node) becomeFollower(term uint64, leader NodeID) {

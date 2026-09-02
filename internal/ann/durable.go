@@ -166,14 +166,21 @@ func (d *DurableNode) GetVector(id string) (vector.Vector, bool) {
 func (d *DurableNode) Addr() string { return d.host.Addr() }
 
 // Status reports this replica's own view of its Raft role and term, matching the shape
-// server.Service.Status already expects via a duck-typed interface. The leader-ID return
-// value is a stand-in for "this node believes it is the leader" rather than a genuine
-// cluster-wide leader ID -- Host does not currently expose the leader ID a follower has
-// heard from, only its own role, and that gap is fine for now (it just means Status on a
-// follower cannot yet answer "so who IS the leader?").
+// server.Service.Status already expects via a duck-typed interface. The returned id is
+// this replica's own recognized leader (0 if unknown), from Host.Leader -- not a
+// guarantee of cluster-wide accuracy, just this replica's local, possibly-stale view.
 func (d *DurableNode) Status() (id raft.NodeID, term uint64, isLeader bool) {
 	role, term := d.host.Status()
-	return 0, term, role == raft.Leader
+	return d.host.Leader(), term, role == raft.Leader
+}
+
+// Leader returns this replica's own recognized leader for the group, or 0 if unknown.
+func (d *DurableNode) Leader() raft.NodeID { return d.host.Leader() }
+
+// TransferLeadershipTo asks this replica, if it is currently leader, to hand leadership
+// to a specific caught-up peer -- see raft.Host.TransferLeadershipTo's doc comment.
+func (d *DurableNode) TransferLeadershipTo(to raft.NodeID) error {
+	return d.host.TransferLeadershipTo(to)
 }
 
 // Close stops the transport and closes the storage engine. It does not delete StorageDir:

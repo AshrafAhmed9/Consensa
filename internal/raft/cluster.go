@@ -112,6 +112,20 @@ func (c *Cluster) ProposeFiltered(leader NodeID, data []byte, deliver func(Messa
 	return c.DeliverFiltered(deliver)
 }
 
+// TransferLeadershipTo submits a leadership transfer through the specified current
+// leader and delivers the resulting MsgTimeoutNow/election exchange across the group,
+// mirroring Propose's shape for the equivalent operation.
+func (c *Cluster) TransferLeadershipTo(from, to NodeID) error {
+	n := c.nodes[from]
+	if n == nil {
+		return errors.New("raft: unknown leader")
+	}
+	if err := n.TransferLeadershipTo(to); err != nil {
+		return err
+	}
+	return c.Deliver()
+}
+
 // Leader returns the current elected leader, if the group has completed an election.
 //
 // More than one node can believe itself Leader at once -- a node isolated by a partition

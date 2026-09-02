@@ -139,12 +139,14 @@ read-refresh (a pushed transaction re-validates its own prior reads instead of a
 outright), proven for both the in-memory `Store` and the real, Raft-replicated
 `DurableStore`; a running binary now advances the closed timestamp and automatically
 grants/renews follower-read leases on a
-real interval, but no RPC surface exposes follower reads to a network client yet. A real,
-intermittent limitation found and documented this session: a cross-range transaction only
-commits through whichever single process happens to lead every range it touches, which
-real network jitter can leave stably split across processes with no server-side
-forwarding to recover (`docs/bugs/003`, mitigated by widening the election stagger but
-not fixed). See
+real interval, but no RPC surface exposes follower reads to a network client yet. A
+cross-range transaction still only commits through whichever single process leads every
+range it touches (no server-side request forwarding), but that process is no longer left
+to chance: a real leadership-transfer primitive (`raft.Host.TransferLeadershipTo`, Raft's
+own `MsgTimeoutNow`) plus a self-correcting affinity policy now actively converges every
+co-located group's leadership onto the same, deterministically-preferred process, fixing
+the real, intermittent stable-split failure documented and previously only mitigated in
+`docs/bugs/003`. See
 `docs/correctness.md` for the complete, current list.
 
 ## Verification

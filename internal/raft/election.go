@@ -71,6 +71,19 @@ func (n *node) handleVote(m Message) {
 	}
 	n.send(Message{Type: MsgVoteResp, To: m.From, Term: n.term, Reject: !ok})
 }
+// handleTimeoutNow starts an election immediately, skipping pre-vote, in response to a
+// transfer nudge from this replica's own recognized leader (see
+// node.TransferLeadershipTo's doc comment for why the sender's own caught-up check makes
+// skipping pre-vote here safe). A message claiming to be from a leader this replica does
+// not currently recognize is ignored -- accepting it would let any peer force an election
+// merely by sending this message type, which is exactly the disruption pre-vote exists
+// elsewhere to prevent.
+func (n *node) handleTimeoutNow(m Message) {
+	if n.role == Leader || m.From != NodeID(n.leader) {
+		return
+	}
+	n.startElection()
+}
 func (n *node) handleVoteResp(m Message) {
 	if n.role != Candidate || m.Term != n.term {
 		return

@@ -81,6 +81,45 @@ func maintainLeases(now time.Time, holder raft.NodeID, duration, renewBefore tim
 	}
 }
 
+// maintainLeadershipAffinity is docs/bugs/003's real fix, not just the electionStaggerSpread
+// mitigation already landed for it (internal/raft/host.go). cmd/consensa hosts three
+// independently-elected Raft groups per process -- the vector index and two KV ranges --
+// and KVService.TransactionalPut can only commit a transaction spanning both KV ranges
+// when the SAME process leads every range it touches, since nothing forwards a write to
+// another process's leader (docs/notes/05-api.md rules that out as a general feature).
+// hostElectionStagger already biases every group's own election toward the same node --
+// the lowest-ranked ID in the shared peer list, identical across all three groups since
+// they share one peer set -- but that bias is only a head start against real network
+// jitter between independently-timed elections, not a guarantee: under enough scheduling
+// variance the groups can settle into a stable split with no further election churn to
+// self-correct it.
+//
+// This closes that gap without any new inter-process signaling or RPC surface: if THIS
+// process currently leads a group but is not itself the preferred (lowest-ranked) node,
+// it proactively calls TransferLeadershipTo the preferred node -- raft.Host's own
+// MsgTimeoutNow primitive, the same mechanism etcd calls leadership transfer, extended
+// here from a manual admin operation into a self-correcting background policy. Every
+// process runs the identical check against the identical, deterministically-computed
+// preferred ID, so this converges to the preferred node leading all three groups without
+// any process needing to learn what group another process currently leads. A transfer
+// that fails (the preferred node has not yet replicated up to this leader's last index)
+// is silently retried on the next tick, the same pattern executeSplitIfRecommended and
+// maintainLeases already use for their own not-yet-ready failures.
+func maintainLeadershipAffinity(selfID, preferredID raft.NodeID, node *ann.DurableNode, leftRange, rightRange *kv.DurableRange) {
+	if selfID == preferredID {
+		return
+	}
+	if _, _, isLeader := node.Status(); isLeader {
+		_ = node.TransferLeadershipTo(preferredID)
+	}
+	if role, _ := leftRange.Status(); role == raft.Leader {
+		_ = leftRange.TransferLeadershipTo(preferredID)
+	}
+	if role, _ := rightRange.Status(); role == raft.Leader {
+		_ = rightRange.TransferLeadershipTo(preferredID)
+	}
+}
+
 // splitCheckRange is the subset of kv.DurableRange checkSplitRecommendations needs.
 type splitCheckRange interface {
 	MaybeSplitKey(threshold int) ([]byte, bool, error)
@@ -417,6 +456,27 @@ func main() {
 			}
 		}()
 	}
+
+	// preferredLeader is the same node every group's own election already deterministically
+	// favors (hostElectionStagger, internal/raft/host.go): the lowest-ranked ID in the
+	// shared peer list, identical across the vector index and both KV ranges since they
+	// all share one peer set. maintainLeadershipAffinity below uses it as the real fix for
+	// docs/bugs/003, not just electionStaggerSpread's mitigation of it.
+	preferredLeader := groupPeers[0]
+	stopAffinity := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(*tickInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopAffinity:
+				return
+			case <-ticker.C:
+				maintainLeadershipAffinity(selfID, preferredLeader, node, leftRange, rightRange)
+			}
+		}
+	}()
+	defer close(stopAffinity)
 
 	// A separate goroutine, unlike closed-timestamp advancement above: MaybeSplitKey only
 	// reads this replica's own storage.Engine directly (AllKeys, durable_range.go) and

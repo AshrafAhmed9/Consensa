@@ -131,6 +131,30 @@ func (h *Host) Status() (Role, uint64) {
 	return h.node.Status()
 }
 
+// Leader reports this replica's own, possibly-stale view of who currently leads the
+// group, or 0 if unknown -- see Node.Leader's doc comment.
+func (h *Host) Leader() NodeID {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.node.Leader()
+}
+
+// TransferLeadershipTo asks this host, if it is currently leader, to hand leadership to a
+// specific caught-up voting peer -- see Node.TransferLeadershipTo's doc comment for the
+// safety argument. This is docs/bugs/003's real fix, not the earlier mitigation
+// (electionStaggerSpread): a process that finds itself leading some but not all of its
+// co-located Raft groups can now actively request leadership of the groups it is missing,
+// rather than only hoping a wider election-timer bias prevents the split from ever
+// occurring in the first place.
+func (h *Host) TransferLeadershipTo(to NodeID) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if err := h.node.TransferLeadershipTo(to); err != nil {
+		return err
+	}
+	return h.driveLocked()
+}
+
 // ConfState returns the membership metadata that must be included with a snapshot made
 // from this host. It is separate from application snapshot bytes because Raft itself,
 // not the state machine, owns quorum configuration.

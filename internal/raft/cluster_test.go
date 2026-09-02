@@ -219,3 +219,98 @@ func TestAsymmetricPartitionDisruptsHealthyLeader(t *testing.T) {
 		t.Fatal("expected the disruptor to eventually win an election against the leader-reachable followers, proving the asymmetric-partition gap is real")
 	}
 }
+
+// TestTransferLeadershipToCaughtUpPeer proves the docs/bugs/003 fix's core primitive: a
+// leader can hand leadership to a specific, fully-replicated peer via MsgTimeoutNow, and
+// that peer wins the resulting election without waiting out a normal randomized timeout.
+func TestTransferLeadershipToCaughtUpPeer(t *testing.T) {
+	c, err := NewCluster([]NodeID{1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := c.Tick(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leader, ok := c.Leader()
+	if !ok || leader != 1 {
+		t.Fatalf("leader=%d elected=%v, want 1", leader, ok)
+	}
+	// Replicate one entry first so the transfer target has something to be caught up on,
+	// not just the empty initial log every replica starts with.
+	if err := c.Propose(leader, []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+
+	target := NodeID(2)
+	if err := c.TransferLeadershipTo(leader, target); err != nil {
+		t.Fatalf("TransferLeadershipTo: %v", err)
+	}
+	newLeader, ok := c.Leader()
+	if !ok || newLeader != target {
+		t.Fatalf("leader after transfer=%d elected=%v, want %d", newLeader, ok, target)
+	}
+}
+
+// TestTransferLeadershipRejectsUncaughtUpPeer proves a leader refuses to hand leadership
+// to a peer whose log is behind -- sending MsgTimeoutNow to that peer would let it win an
+// election and then be unable to reconstruct entries the old leader already committed,
+// violating Raft's leader-completeness property.
+func TestTransferLeadershipRejectsUncaughtUpPeer(t *testing.T) {
+	c, err := NewCluster([]NodeID{1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := c.Tick(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leader, ok := c.Leader()
+	if !ok || leader != 1 {
+		t.Fatalf("leader=%d elected=%v, want 1", leader, ok)
+	}
+	// Isolate node 2 before proposing, so its log falls behind nodes 1 and 3.
+	behind := NodeID(2)
+	isolate := func(m Message) bool { return m.From != behind && m.To != behind }
+	if err := c.ProposeFiltered(leader, []byte("v"), isolate); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.TransferLeadershipTo(leader, behind); err == nil {
+		t.Fatal("expected TransferLeadershipTo to reject a peer that has not caught up")
+	}
+	if current, ok := c.Leader(); !ok || current != leader {
+		t.Fatalf("leader after rejected transfer=%d elected=%v, want unchanged %d", current, ok, leader)
+	}
+}
+
+// TestTransferLeadershipRequiresLeader proves a follower cannot initiate a transfer --
+// only the current leader has anything to hand off, and Node.TransferLeadershipTo's own
+// caught-up check only makes sense relative to a leader's own log.
+func TestTransferLeadershipRequiresLeader(t *testing.T) {
+	c, err := NewCluster([]NodeID{1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := c.Tick(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	leader, ok := c.Leader()
+	if !ok || leader != 1 {
+		t.Fatalf("leader=%d elected=%v, want 1", leader, ok)
+	}
+	var follower NodeID
+	for _, id := range []NodeID{1, 2, 3} {
+		if id != leader {
+			follower = id
+			break
+		}
+	}
+	if err := c.TransferLeadershipTo(follower, leader); err == nil {
+		t.Fatal("expected TransferLeadershipTo to reject a call from a non-leader")
+	}
+}

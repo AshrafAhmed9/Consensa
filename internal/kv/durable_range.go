@@ -392,6 +392,15 @@ func validateRangeKey(key []byte) error {
 // Status reports this replica's own Raft role and term.
 func (r *DurableRange) Status() (raft.Role, uint64) { return r.host.Status() }
 
+// Leader returns this replica's own recognized leader for the range, or 0 if unknown.
+func (r *DurableRange) Leader() raft.NodeID { return r.host.Leader() }
+
+// TransferLeadershipTo asks this replica, if it is currently leader, to hand leadership
+// to a specific caught-up peer -- see raft.Host.TransferLeadershipTo's doc comment.
+func (r *DurableRange) TransferLeadershipTo(to raft.NodeID) error {
+	return r.host.TransferLeadershipTo(to)
+}
+
 // Addr returns this replica's bound transport address.
 func (r *DurableRange) Addr() string { return r.host.Addr() }
 
