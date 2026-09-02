@@ -19,25 +19,33 @@ import (
 // on which one's own local replica wins the new child group's leadership, which is not
 // deterministically any particular node -- executeSplitIfRecommended's own doc comment
 // explains why every process runs the identical check independently rather than one
-// coordinator deciding. Unlike raftTermFromMetrics's exact-line match, this is a prefix
-// match against the labeled series name, since the counter's full label set
-// (left_range_id/right_range_id) is exactly what this test does NOT want to hardcode.
+// coordinator deciding. Unlike raftTermFromMetrics's exact-line match, this checks that
+// the metric name and the parent_range_id label both appear on the same line, since the
+// counter's full label set (left_range_id/right_range_id) is exactly what this test does
+// NOT want to hardcode -- and cannot assume label ORDER either: prometheus's text
+// exposition format sorts label names alphabetically, so "left_range_id" (l) always
+// precedes "parent_range_id" (p) on the wire regardless of the order CounterVec's labels
+// were declared in. A bare prefix match against `metricName{parent_range_id="..."`
+// therefore never matches -- found as a real CI failure where the split logs proved
+// migration succeeded on all three processes within a second, yet the test still timed
+// out after 30s of scraping, because the line it was looking for could never appear.
 func splitExecutedForParent(t *testing.T, metricAddrs []string, parentID int, deadline time.Duration) {
 	t.Helper()
-	prefix := fmt.Sprintf(`consensa_kv_split_executed_total{parent_range_id="%d"`, parentID)
+	name := "consensa_kv_split_executed_total"
+	label := fmt.Sprintf(`parent_range_id="%d"`, parentID)
 	end := time.Now().Add(deadline)
 	for time.Now().Before(end) {
 		for _, addr := range metricAddrs {
-			if metricLineExists(t, addr, prefix) {
+			if metricLineExists(t, addr, name, label) {
 				return
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("no %s* series appeared on any of %v within %s -- live split never executed", prefix, metricAddrs, deadline)
+	t.Fatalf("no %s{...%s...} series appeared on any of %v within %s -- live split never executed", name, label, metricAddrs, deadline)
 }
 
-func metricLineExists(t *testing.T, metricAddr, prefix string) bool {
+func metricLineExists(t *testing.T, metricAddr, name, label string) bool {
 	t.Helper()
 	resp, err := http.Get(fmt.Sprintf("http://%s/metrics", metricAddr))
 	if err != nil {
@@ -46,7 +54,8 @@ func metricLineExists(t *testing.T, metricAddr, prefix string) bool {
 	defer resp.Body.Close()
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
-		if strings.HasPrefix(scanner.Text(), prefix) {
+		line := scanner.Text()
+		if strings.HasPrefix(line, name+"{") && strings.Contains(line, label) {
 			return true
 		}
 	}
