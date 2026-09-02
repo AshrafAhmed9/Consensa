@@ -21,6 +21,7 @@ import (
 
 	consensav1 "github.com/ashraf/consensa/api/consensa/v1"
 	"github.com/ashraf/consensa/internal/ann"
+	"github.com/ashraf/consensa/internal/auth"
 	"github.com/ashraf/consensa/internal/kv"
 	"github.com/ashraf/consensa/internal/metrics"
 	"github.com/ashraf/consensa/internal/raft"
@@ -372,6 +373,7 @@ func main() {
 	splitThreshold := flag.Int("split-threshold", 100000, "key count above which a KV range is reported as recommending a split (consensa_kv_split_recommended)")
 	leaseDuration := flag.Duration("lease-duration", 6*time.Second, "how long an automatically granted follower-read lease is valid for once committed")
 	leaseRenewBefore := flag.Duration("lease-renew-before", 3*time.Second, "renew a range's lease once less than this much validity remains, so a valid lease exists continuously rather than lapsing between grants")
+	authToken := flag.String("auth-token", "", "shared-secret bearer token every gRPC call must present (internal/auth); empty disables auth entirely, matching this project's previous unauthenticated behavior")
 	flag.Parse()
 
 	if *id == 0 {
@@ -718,7 +720,16 @@ func main() {
 	if err != nil {
 		fatal("starting gRPC listener", "error", err, "address", *grpcListen)
 	}
-	grpcServer := grpc.NewServer()
+	// tokenAuth.Enabled() is false (a no-op) unless --auth-token is set, so every existing
+	// deployment, demo, and test that never learned about auth keeps working unmodified --
+	// see internal/auth's own package doc for why a shared-secret bearer token, off by
+	// default, is this project's answer to the "deliberately unauthenticated" gap named in
+	// api/consensa/v1/consensa.proto and docs/adr/010-learners.md.
+	tokenAuth := auth.NewTokenAuth(*authToken)
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(tokenAuth.UnaryInterceptor),
+		grpc.ChainStreamInterceptor(tokenAuth.StreamInterceptor),
+	)
 	consensav1.RegisterConsensaServer(grpcServer, service)
 	consensav1.RegisterConsensaKVServer(grpcServer, kvService)
 	consensav1.RegisterConsensaAdminServer(grpcServer, adminService)

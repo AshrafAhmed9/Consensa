@@ -219,11 +219,12 @@ does *not* prove) lives — this section is a current index, not a replacement f
   to a full voter (`TestBrandNewProcessJoinsLiveGroupAsLearnerThenVoter`). This is now
   reachable over real gRPC too, not just direct Go calls: `ConsensaAdmin.AddReplica`/
   `PromoteReplica` (`internal/server/admin_service.go`) expose the identical sequence,
-  proven end to end by `TestAdminServiceAddsAndPromotesReplicaOverGRPC` -- deliberately
-  unauthenticated, matching every other RPC in this codebase, since there is no auth
-  layer anywhere in this project yet. Still unbuilt: any auth layer at all, bootstrap
-  discovery of which address to call, and updating client routing after a membership
-  change. See `docs/adr/010-learners.md`.
+  proven end to end by `TestAdminServiceAddsAndPromotesReplicaOverGRPC` -- gated, like
+  every other RPC in this codebase, by `internal/auth`'s optional shared-secret
+  bearer-token interceptor (off by default; see `docs/notes/13-auth.md`). Still unbuilt:
+  per-RPC or per-service auth scoping (a valid token authorizes everything equally),
+  bootstrap discovery of which address to call, and updating client routing after a
+  membership change. See `docs/adr/010-learners.md`.
   A real performance regression was found and fixed while closing this: recomputing
   membership from the full log on every heartbeat and every proposed write (not just
   actual config changes) was cheap in unit tests but measurably destabilized leadership
@@ -260,3 +261,19 @@ does *not* prove) lives — this section is a current index, not a replacement f
   each checked by TLC with a required negative-control variant that must fail — proving
   the checker itself is discriminating, not just that the correct model happens to pass.
   See `specs/README.md`.
+- **Every gRPC RPC is gated by an optional shared-secret bearer-token layer.**
+  `internal/auth.TokenAuth` installs as a `grpc.ChainUnaryInterceptor`/
+  `ChainStreamInterceptor` pair on the one shared `grpc.Server` all three services
+  (`Consensa`, `ConsensaKV`, `ConsensaAdmin`) register on — proven with a real bufconn
+  gRPC server and client (`TestUnaryInterceptorRejectsMissingToken`,
+  `TestUnaryInterceptorAcceptsBearerCredentials`,
+  `TestUnaryInterceptorRejectsWrongBearerCredentials`), and against the real shipped
+  binary (`TestConsensaBinaryEnforcesAuthTokenWhenConfigured`). It is off by default (an
+  empty `--auth-token`), so every existing deployment, test, and demo client that never
+  learned about auth keeps working unmodified
+  (`TestConsensaBinaryWithoutAuthTokenAllowsUnauthenticatedCalls`). The secret comparison
+  uses `crypto/subtle.ConstantTimeCompare` to avoid a timing side channel. Stated plainly,
+  not left implied: this is a single shared secret authorizing every RPC equally, with no
+  per-user identity, no scoping, no rotation, and no transport encryption of its own — a
+  real deployment needs TLS in front of it before the token stops traveling in cleartext.
+  See `docs/notes/13-auth.md`.

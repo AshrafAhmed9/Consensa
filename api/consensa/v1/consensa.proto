@@ -42,11 +42,14 @@ message TransactionalPutResponse {}
 // consensus membership-change primitives (Host.AddKnownPeer, Host.AddPeer,
 // DurableRange.ProposeConfChange), proven in internal/raft/new_node_join_test.go against
 // real processes but until this service nothing reachable over the network could ever
-// drive them. Like every other RPC in this codebase, this is deliberately unauthenticated
-// -- there is no auth layer anywhere in this project yet, and adding one only for this
-// service would imply a false sense of protection nothing else here actually has. A real
-// deployment would need to put this behind a real auth layer before exposing it publicly;
-// that is separate, unbuilt work, stated here rather than left implied.
+// drive them. Like every other RPC in this codebase, this is gated by internal/auth's
+// optional shared-secret bearer-token interceptor (--auth-token in cmd/consensa/main.go),
+// off by default -- a valid token authorizes every RPC in every service on this shared
+// grpc.Server equally, including this one; there is no per-service or per-method scoping,
+// stated plainly since a valid client credential is not restricted from calling
+// membership-change RPCs specifically. A real deployment should also put this behind TLS
+// (internal/auth's own doc comment states why the token layer alone does not protect
+// against network eavesdropping) before exposing it publicly.
 service ConsensaAdmin {
   // AddReplica registers a new (possibly brand-new, previously-unknown) node's ID and
   // transport address on the named range, so a subsequent PromoteReplica call naming that

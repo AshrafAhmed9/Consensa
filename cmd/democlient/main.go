@@ -16,15 +16,24 @@ import (
 	"time"
 
 	consensav1 "github.com/ashraf/consensa/api/consensa/v1"
+	"github.com/ashraf/consensa/internal/auth"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+// authToken is package-level, not threaded through every call, so dial (below) can attach
+// it uniformly without changing eachAddr/searchOnly/transactionalPut's own signatures --
+// this is a demo CLI, not a library, so a package global for one process-lifetime CLI flag
+// is the appropriate level of ceremony, not a shortcut.
+var authToken string
 
 func main() {
 	addrs := flag.String("addrs", "", "comma-separated gRPC addresses to try, in order, e.g. 127.0.0.1:8081,127.0.0.1:8082,127.0.0.1:8083")
 	action := flag.String("action", "upsert-and-search", "upsert-and-search | search-only | txn")
 	timeout := flag.Duration("timeout", 15*time.Second, "how long to keep retrying across addrs before giving up")
+	token := flag.String("auth-token", "", "bearer token to present on every call (internal/auth); must match the target node's --auth-token, or be empty if it has none")
 	flag.Parse()
+	authToken = *token
 
 	if *addrs == "" {
 		log.Fatal("--addrs is required")
@@ -44,7 +53,10 @@ func main() {
 }
 
 func dial(addr string) (*grpc.ClientConn, error) {
-	return grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	return grpc.NewClient(addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithPerRPCCredentials(auth.NewBearerCredentials(authToken)),
+	)
 }
 
 // eachAddr retries fn against every address in order, in a loop, until it succeeds or

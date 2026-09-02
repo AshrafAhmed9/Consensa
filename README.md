@@ -95,7 +95,7 @@ does and doesn't cover, is in [`docs/correctness.md`](docs/correctness.md).
 | **Chaos testing** | A seeded Python harness drives real partitions, process kills, and clock skew against real Raft clusters and checks the resulting history for linearizability (via [Porcupine](https://github.com/anishathalye/porcupine)) and search-result correctness. |
 | **Cross-shard transactions** | A 2PC coordinator commits atomically across two independent 3-node Raft groups, reachable over a real gRPC call, and survives a coordinator crash mid-commit. |
 | **Live range splits** | A shard splits into two fresh replica groups with no vector or key lost, duplicated, or leaking across the new boundary — proven on both the KV and vector planes, including publishing the new routing metadata atomically so both a fresh client and one holding a pre-split cached route resolve correctly afterward. Both planes now do this fully automatically inside the running binary, not just as a library primitive — real writes crossing a threshold trigger real child Raft groups standing up and taking over live traffic. |
-| **Joint-consensus membership changes** | Adding, promoting, or removing a replica goes through Raft's two-phase joint-consensus protocol, so a disjoint old/new majority can never both elect a leader — the specific failure mode joint consensus exists to prevent is covered directly. This now includes provisioning a genuinely new, previously-unknown process, reachable over a real (unauthenticated) `ConsensaAdmin` gRPC surface, not just an internal Go primitive. |
+| **Joint-consensus membership changes** | Adding, promoting, or removing a replica goes through Raft's two-phase joint-consensus protocol, so a disjoint old/new majority can never both elect a leader — the specific failure mode joint consensus exists to prevent is covered directly. This now includes provisioning a genuinely new, previously-unknown process, reachable over a real, optionally auth-gated `ConsensaAdmin` gRPC surface, not just an internal Go primitive. |
 | **Read-path ladder** | Leader reads via a quorum-confirmed barrier (`ReadIndex`); follower reads via a replicated lease and closed timestamp, rejected until both are actually valid — not just modeled. |
 | **Write-skew prevention** | The classic "two on-call doctors" anomaly is reproduced and the specific write that would complete it is rejected, on both the in-memory and Raft-replicated code paths; a transaction pushed by that check can also read-refresh and commit anyway instead of always aborting, proven on both paths too. |
 | **Formal verification** | TLA+ models of joint-consensus quorum intersection and recursive range splitting, model-checked by TLC — each with a deliberately broken variant that must fail, so the checker itself is proven discriminating. |
@@ -136,9 +136,13 @@ end-to-end, not PLAN.md's own named answer to HNSW-under-splits (incremental rep
 stale-parent fallback), which remains real, unimplemented future work. There is still no
 in-flight request cutover (an RPC already routed to the parent mid-split completes there;
 a client re-routes on its next call), and no QPS-based trigger exists, only size. Joint consensus can now provision a genuinely new, previously-unknown
-process too, reachable over a real (deliberately unauthenticated, like every other RPC
-here) `ConsensaAdmin.AddReplica`/`PromoteReplica` gRPC surface -- `cmd/consensa` now
-exposes it, not just `internal/raft`'s own primitives; snapshot isolation now supports
+process too, reachable over a real `ConsensaAdmin.AddReplica`/`PromoteReplica` gRPC
+surface -- `cmd/consensa` now exposes it, not just `internal/raft`'s own primitives, and
+every RPC across all three services is now gated by an optional shared-secret bearer-token
+layer (`--auth-token`, off by default; see `docs/notes/13-auth.md` and
+`internal/auth`) -- one secret authorizes everything equally, with no per-user identity,
+scoping, or transport encryption of its own, stated plainly rather than left implied.
+Snapshot isolation now supports
 read-refresh (a pushed transaction re-validates its own prior reads instead of aborting
 outright), proven for both the in-memory `Store` and the real, Raft-replicated
 `DurableStore`; a running binary now advances the closed timestamp and automatically

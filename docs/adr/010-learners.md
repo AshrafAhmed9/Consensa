@@ -82,18 +82,18 @@ expose exactly the two-step sequence above -- `AddReplica` calls `AddKnownPeer`/
 `AddPeerAddress` (must be called on every replica, not just the leader);
 `PromoteReplica` calls `ProposeConfChange` (only succeeds against the current leader,
 the same "route to whoever's in charge" contract `ConsensaKV.TransactionalPut` already
-established). Deliberately unauthenticated, matching every other RPC in this codebase --
-there is no auth layer anywhere in this project yet, and this service is not exempt from
-that honest gap. `TestAdminServiceAddsAndPromotesReplicaOverGRPC` proves the full
+established). Gated by `internal/auth`'s optional shared-secret bearer-token interceptor
+like every other RPC in this codebase (off by default; see `docs/notes/13-auth.md`), not
+exempt from it. `TestAdminServiceAddsAndPromotesReplicaOverGRPC` proves the full
 sequence entirely over real gRPC (not direct Go calls): a genuinely new 4th
 `kv.DurableRange`, unknown to any of the original three until `AddReplica` runs, joins as
 a learner, catches up over real replication, and is promoted to a full voter.
 
-**What this still does not do, stated plainly:** no real auth layer protects this
-service or any other RPC in the project -- deploying it publicly without one is a real,
-stated gap, not an oversight. Bootstrap (how a fresh process learns which group to even
-try joining, i.e. discovering `AddReplica`'s own address to call it) and range-routing
-updates after a membership change remain separate, undone work.
+**What this still does not do, stated plainly:** a valid auth token authorizes every RPC
+equally -- there is no scoping that would let a token call ordinary data-plane RPCs but
+not this membership-changing one. Bootstrap (how a fresh process learns which group to
+even try joining, i.e. discovering `AddReplica`'s own address to call it) and
+range-routing updates after a membership change remain separate, undone work.
 
 A real bug was found and fixed while proving this, caught by real CI (not local, not by
 inspection): `AddKnownPeer` originally only appended to `n.peers`, but a currently-leading
