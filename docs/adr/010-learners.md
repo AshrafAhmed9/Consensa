@@ -81,3 +81,14 @@ calls any of this yet -- `AddKnownPeer`/`AddPeer`/`ProposeConfChange` are proven
 primitives, not something `cmd/consensa` or `kv.DurableRange`'s callers can trigger over
 the network. Bootstrap (how a fresh process learns which group to even try joining) and
 range-routing updates after a membership change remain separate, undone work.
+
+A real bug was found and fixed while proving this, caught by real CI (not local, not by
+inspection): `AddKnownPeer` originally only appended to `n.peers`, but a currently-leading
+replica's `n.next` map -- which `sendAppend` reads as `next := n.next[to]` before
+computing `prev := next - 1` -- is otherwise only initialized once, in `becomeLeader`, for
+whichever peers were already known at that election. A peer added afterward had no
+`n.next` entry, so `next` read as the zero value and `prev := next - 1` underflowed
+`uint64` to its maximum value, producing a nonsense `AppendEntries` the new peer could
+only ever reject. `AddKnownPeer` now also seeds `n.next[id]` when called on the current
+leader, mirroring exactly what `becomeLeader` already does for every peer at election
+time.

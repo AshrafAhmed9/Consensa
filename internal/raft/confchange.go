@@ -180,8 +180,18 @@ func (n *node) votingPeers() []NodeID {
 // still knows nothing about). Promoting an existing learner, or changing which of the
 // already-known peers are voters, needed neither extra step and still doesn't.
 // AddKnownPeer implements Node.AddKnownPeer -- see that interface method's doc comment.
-// It only extends n.peers (the message-routing/ProposeConfChange-eligibility universe);
+// It extends n.peers (the message-routing/ProposeConfChange-eligibility universe);
 // Membership, the log, and quorum accounting are all untouched.
+//
+// If this replica is currently leader, it also seeds n.next[id] the same way
+// becomeLeader seeds it for every peer known at election time (see becomeLeader) --
+// without this, sendAppend's "next := n.next[to]" would read the zero value for a peer
+// added after this replica already became leader, then compute prev := next-1 as a
+// uint64 underflow (next is unsigned), producing a nonsense huge Index in every
+// AppendEntries to the new peer that it can only ever reject. A peer added while this
+// replica is a follower needs no such fix-up: becomeLeader already re-initializes n.next
+// from scratch (including this new ID, since it's now in n.peers) the next time this
+// replica wins an election.
 func (n *node) AddKnownPeer(id NodeID) {
 	for _, p := range n.peers {
 		if p == id {
@@ -189,6 +199,9 @@ func (n *node) AddKnownPeer(id NodeID) {
 		}
 	}
 	n.peers = append(n.peers, id)
+	if n.role == Leader {
+		n.next[id] = n.log.lastIndex() + 1
+	}
 }
 
 func (n *node) ProposeConfChange(newVoters, newLearners []NodeID) error {

@@ -92,9 +92,12 @@ func TestBrandNewProcessJoinsLiveGroupAsLearnerThenVoter(t *testing.T) {
 	if err := proposeToLeader(hosts[:3], []byte("after node 4 joins as learner"), 20*time.Second); err != nil {
 		t.Fatalf("no leader accepted the second proposal: %v", err)
 	}
-	waitForCount(t, log, fourID, 1, 20*time.Second)
+	// Node 4 started with an empty log, so catching up necessarily replicates the FIRST
+	// proposal too (its own log has nothing at index 1 to match against) before it can
+	// apply the second -- wait for both, not just "at least one entry."
+	waitForCount(t, log, fourID, 2, 20*time.Second)
 	if got := log.last(fourID); string(got) != "after node 4 joins as learner" {
-		t.Fatalf("node 4 applied %q, want the second proposal's data", got)
+		t.Fatalf("node 4's last applied entry = %q, want the second proposal's data", got)
 	}
 
 	// Promote node 4 to a full voter and confirm the group still commits with it counted
