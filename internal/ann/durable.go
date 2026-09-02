@@ -2,6 +2,7 @@ package ann
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/ashraf/consensa/internal/raft"
 	"github.com/ashraf/consensa/internal/storage"
@@ -23,7 +24,18 @@ type DurableNode struct {
 
 	appliedMu sync.Mutex
 	applied   int
+
+	// requestCount is a raw cumulative counter of Insert/Delete/Search/GetVector calls
+	// THIS replica has served -- the same shape and reasoning as kv.DurableRange's own
+	// requestCount field (internal/kv/durable_range.go): a rate is a caller's job, not
+	// this type's, and it exists so cmd/consensa's split-check loop can derive a real
+	// per-range QPS for SplitTrigger.QPS.
+	requestCount atomic.Uint64
 }
+
+// RequestCount returns the total number of Insert/Delete/Search/GetVector calls this
+// replica has served since it started -- see the requestCount field's own doc comment.
+func (d *DurableNode) RequestCount() uint64 { return d.requestCount.Load() }
 
 // DurableNodeConfig names everything one replica needs: its own storage directory (reused
 // verbatim across a restart), the fixed Raft group membership, its own listen address, and
@@ -120,6 +132,7 @@ func (d *DurableNode) ProposeConfChange(voters, learners []raft.NodeID) error {
 // leader should retry across replicas the way internal/raft/host_test.go's
 // proposeToLeader does.
 func (d *DurableNode) Insert(id string, v vector.Vector) error {
+	d.requestCount.Add(1)
 	data, err := EncodeMutation(id, v)
 	if err != nil {
 		return err
@@ -129,6 +142,7 @@ func (d *DurableNode) Insert(id string, v vector.Vector) error {
 
 // Delete proposes a deterministic deletion mutation. See Insert for the leader contract.
 func (d *DurableNode) Delete(id string) error {
+	d.requestCount.Add(1)
 	data, err := EncodeDeleteMutation(id)
 	if err != nil {
 		return err
@@ -140,6 +154,7 @@ func (d *DurableNode) Delete(id string) error {
 // mutation is applied, every replica's graph is equal by construction (Mutation.go's
 // determinism guarantee), so any replica -- not only the leader -- may safely serve reads.
 func (d *DurableNode) Search(query vector.Vector, k, ef int) ([]Result, error) {
+	d.requestCount.Add(1)
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.index.Search(query, k, ef)
@@ -174,8 +189,9 @@ func (d *DurableNode) AllVectors() map[string]vector.Vector {
 // kv.DurableRange.MaybeSplitKey exactly. The error return exists for interface symmetry
 // with the KV version (executeSplitTarget-shaped callers in cmd/consensa expect it) even
 // though nothing here can actually fail short of a read that never touches Raft or disk.
-func (d *DurableNode) MaybeSplitKey(threshold int) (string, bool, error) {
-	splitKey, recommended := ShouldSplit(threshold, d.AllVectors())
+// qps is the caller's own already-computed request rate for this range.
+func (d *DurableNode) MaybeSplitKey(sizeThreshold int, qps, qpsThreshold float64) (string, bool, error) {
+	splitKey, recommended := ShouldSplit(SplitTrigger{SizeThreshold: sizeThreshold, QPS: qps, QPSThreshold: qpsThreshold}, d.AllVectors())
 	return splitKey, recommended, nil
 }
 

@@ -135,7 +135,12 @@ structure compensates -- the minimum viable decision proving automatic execution
 end-to-end, not PLAN.md's own named answer to HNSW-under-splits (incremental repair or a
 stale-parent fallback), which remains real, unimplemented future work. There is still no
 in-flight request cutover (an RPC already routed to the parent mid-split completes there;
-a client re-routes on its next call), and no QPS-based trigger exists, only size. Joint consensus can now provision a genuinely new, previously-unknown
+a client re-routes on its next call). The split trigger is no longer size-only: both
+planes now also support a QPS threshold (`--split-qps-threshold`, off by default), so a
+range that is small by key/vector count but genuinely hot under a skewed access pattern
+can still recommend a split -- `kv.ShouldSplit`/`ann.ShouldSplit` fire on either active
+criterion, backed by a real per-range request counter and a live rate sampled the same
+way the existing QPS metric already was. Joint consensus can now provision a genuinely new, previously-unknown
 process too, reachable over a real `ConsensaAdmin.AddReplica`/`PromoteReplica` gRPC
 surface -- `cmd/consensa` now exposes it, not just `internal/raft`'s own primitives, and
 every RPC across all three services is now gated by an optional shared-secret bearer-token

@@ -154,8 +154,7 @@ any in-flight transaction's own bookkeeping remains locally readable there), but
 transaction that happens to still be in flight at the exact moment a split executes is an
 edge case this project has not modeled further. There is still no *in-flight request*
 cutover (an RPC already routed to the parent mid-split does not get redirected; a client
-must complete its current attempt, then re-route on its next one). No QPS-based trigger
-exists, only size. The "rebuild from scratch" strategy remains the most expensive of the
+must complete its current attempt, then re-route on its next one). The "rebuild from scratch" strategy remains the most expensive of the
 three named options -- real production use would want incremental repair or a
 stale-parent-during-rebuild fallback to avoid the latency cliff every key pays while
 being re-inserted one at a time.
@@ -215,6 +214,44 @@ resulting connection -- a peer whose own receive loop stalls (for any reason, in
 the first bug above) could block a write indefinitely, and since `Host.driveLocked` calls
 `Send` while holding the host's own mutex, that indefinite block held the lock forever
 too. Fixed by setting a matching 1-second deadline on the connection before writing.
+
+**Update: the split trigger is no longer size-only.** `kv.ShouldSplit`/`ann.ShouldSplit`
+now take a `SplitTrigger{SizeThreshold, QPS, QPSThreshold}` instead of a bare `int`
+threshold, and recommend a split once EITHER active (positive) criterion is exceeded --
+size alone can never catch a range that is small by key/vector count but genuinely hot
+under a skewed access pattern (a handful of keys or vectors accessed far more often than
+the rest of the range), which is exactly PLAN.md's own named gap this closes ("no
+QPS-based trigger exists, only size").
+
+Getting a real QPS number required a real per-range request counter, which did not exist
+before: `kv.DurableRange`/`ann.DurableNode` each gained their own `requestCount
+atomic.Uint64`, incremented on every `Put`/`Delete`/`Get` or `Insert`/`Delete`/`Search`
+respectively -- the same shape and reasoning as `server.Service`'s own pre-existing
+`requestCount`, but per-replica instead of per-process, since a split decision needs to
+know THIS range's load, not the whole node's aggregate. `cmd/consensa`'s new `qpsTracker`
+turns that raw counter into a rate via the identical delta-over-a-window technique the
+pre-existing `consensa_range_qps` sampling loop already used for the whole node, just
+applied per range ID instead of once globally -- computed exactly once per range per
+split-check tick and reused for both the recommendation gauge and the execution call, since
+`qpsTracker.rate` is a one-shot sample that would silently corrupt its own measured window
+if called twice against the same baseline in the same tick.
+
+`--split-qps-threshold` (default `0`, disabled) controls this independently of
+`--split-threshold`, so a deployment that never sets it keeps today's size-only behavior
+exactly. The split-point choice itself is unchanged regardless of which criterion fired --
+still the median key/ID by sorted order, since the goal either way is two roughly-equal
+children, not a boundary that reflects WHY the split triggered.
+
+**What this still does not prove, stated plainly:** the QPS measured is per-replica, not
+cluster-wide -- a range whose write traffic is served by one leader but whose read traffic
+is spread across followers (this project's own follower-read support, `docs/notes/09-leases.md`)
+would undercount its true aggregate load unless every replica happens to run with the same
+`--split-qps-threshold` and independently reaches the same conclusion, which the existing
+"every process runs the identical check" design already relies on for the size trigger too.
+There is no smoothing or hysteresis on the QPS signal -- a single hot tick can recommend a
+split that a slightly later, quieter tick would not have, though `executed`/`inProgress`'s
+existing once-per-parent guard means a recommendation only ever triggers execution once,
+not a flapping series of attempts.
 
 ## What can fail?
 

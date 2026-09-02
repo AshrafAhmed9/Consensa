@@ -202,7 +202,7 @@ func TestMaybeSplitKeyDrivesARealLiveSplit(t *testing.T) {
 	deadline := time.Now().Add(20 * time.Second)
 	for leader == nil {
 		for _, r := range parentLive {
-			if key, ok, err := r.MaybeSplitKey(len(dataset) - 1); err == nil && ok {
+			if key, ok, err := r.MaybeSplitKey(len(dataset)-1, 0, 0); err == nil && ok {
 				leader = r
 				splitKey = key
 				break

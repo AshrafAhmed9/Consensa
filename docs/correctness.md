@@ -168,7 +168,13 @@ does *not* prove) lives — this section is a current index, not a replacement f
   and prove no record lost or duplicated and no cross-boundary leakage in either child.
   `ShouldSplit`/`DurableRange.MaybeSplitKey` close the split-*trigger decision* (a real
   size threshold picking the median key of the range's actual data,
-  `TestMaybeSplitKeyDrivesARealLiveSplit`). Automatic execution and live traffic cutover
+  `TestMaybeSplitKeyDrivesARealLiveSplit`), and it is no longer size-only: both planes'
+  `ShouldSplit` also accept a QPS threshold, backed by a real per-range request counter
+  (`DurableRange`/`DurableNode.RequestCount`) and `cmd/consensa`'s own `qpsTracker`
+  turning it into a live rate, so a range that is small by key/vector count but genuinely
+  hot under a skewed access pattern still recommends a split
+  (`TestShouldSplitQPSTriggerIndependentOfSize`,
+  `TestCheckSplitRecommendationsSetsGaugeAboveQPSThreshold`). Automatic execution and live traffic cutover
   are now closed for the KV plane: `kv.ExecuteLiveSplit` migrates data into two fresh
   child ranges `cmd/consensa` stands up on its own already-shared transport, then
   publishes new routing and registers the children with the running `KVService`/

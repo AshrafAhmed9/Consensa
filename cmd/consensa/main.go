@@ -124,20 +124,74 @@ func maintainLeadershipAffinity(selfID, preferredID raft.NodeID, node *ann.Durab
 
 // splitCheckRange is the subset of kv.DurableRange checkSplitRecommendations needs.
 type splitCheckRange interface {
-	MaybeSplitKey(threshold int) ([]byte, bool, error)
+	MaybeSplitKey(sizeThreshold int, qps, qpsThreshold float64) ([]byte, bool, error)
+	RequestCount() uint64
 }
 
-// checkSplitRecommendations runs kv.ShouldSplit's decision (via MaybeSplitKey) against
-// every named range and records the result as a gauge -- purely the decision signal,
-// updated regardless of whether execution has happened yet (see
-// consensa_kv_split_executed_total, set only by executeSplitIfRecommended below, for the
-// execution signal). AllKeys is a full scan of the range's applied data (see its own doc
-// comment), so this is deliberately checked on a slower, separate cadence from Raft
-// ticking and closed-timestamp advancement, not on every tick.
-func checkSplitRecommendations(threshold int, gauge *prometheus.GaugeVec, ranges map[string]splitCheckRange) {
+// qpsTracker turns each range's own raw, cumulative RequestCount into a real requests/sec
+// rate, the same delta-over-a-window technique the pre-existing consensa_range_qps
+// sampling loop (below, in main) already uses for the whole node -- this is that same
+// idea applied per range, since a per-range split decision needs a per-range rate, not
+// one node-wide number. It is deliberately its own small type rather than inline map
+// bookkeeping in checkSplitRecommendations: a range created after startup (a live split's
+// fresh child) needs its own independent first-sample baseline the moment it starts being
+// checked, not one borrowed from whatever the tracker's single last-checked-at time
+// happened to be for an unrelated range checked earlier in the same tick.
+type qpsTracker struct {
+	mu   sync.Mutex
+	last map[string]struct {
+		count uint64
+		at    time.Time
+	}
+}
+
+func newQPSTracker() *qpsTracker {
+	return &qpsTracker{last: map[string]struct {
+		count uint64
+		at    time.Time
+	}{}}
+}
+
+// rate returns rangeID's observed requests/sec since the last call naming that same ID,
+// or 0 on the first call (no prior sample to diff against) -- matching the existing
+// consensa_range_qps loop's own "first window reports nothing" behavior.
+func (t *qpsTracker) rate(rangeID string, count uint64) float64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := time.Now()
+	prev, ok := t.last[rangeID]
+	t.last[rangeID] = struct {
+		count uint64
+		at    time.Time
+	}{count, now}
+	if !ok || count < prev.count {
+		return 0
+	}
+	elapsed := now.Sub(prev.at).Seconds()
+	if elapsed <= 0 {
+		return 0
+	}
+	return float64(count-prev.count) / elapsed
+}
+
+// checkSplitRecommendations runs ShouldSplit's decision (via MaybeSplitKey) against every
+// named range and records the result as a gauge -- purely the decision signal, updated
+// regardless of whether execution has happened yet (see consensa_kv_split_executed_total,
+// set only by executeSplitIfRecommended below, for the execution signal). AllKeys is a
+// full scan of the range's applied data (see its own doc comment), so this is
+// deliberately checked on a slower, separate cadence from Raft ticking and closed-
+// timestamp advancement, not on every tick.
+//
+// qps is precomputed by the caller (one qpsTracker.rate call per range per tick), not
+// derived here: the identical rangeID also feeds a direct executeSplitIfRecommended call
+// in the same tick, and qpsTracker.rate is a one-shot sample that consumes and replaces
+// its own last-count/last-time baseline on every call -- calling it twice for the same
+// range in the same tick would silently halve the measured window instead of reusing one
+// real reading, corrupting the very rate this exists to compute accurately.
+func checkSplitRecommendations(sizeThreshold int, qpsThreshold float64, qps map[string]float64, gauge *prometheus.GaugeVec, ranges map[string]splitCheckRange) {
 	for rangeID, r := range ranges {
 		value := 0.0
-		if _, recommended, err := r.MaybeSplitKey(threshold); err == nil && recommended {
+		if _, recommended, err := r.MaybeSplitKey(sizeThreshold, qps[rangeID], qpsThreshold); err == nil && recommended {
 			value = 1
 		}
 		gauge.WithLabelValues(rangeID).Set(value)
@@ -188,7 +242,7 @@ type executeSplitTarget interface {
 // TestConsensaBinaryExecutesALiveSplitAutomatically ("storage: invalid SSTable record"
 // on the retry, then the whole process exiting via newKVRange's own fatal()).
 func executeSplitIfRecommended(
-	parentID uint64, parent executeSplitTarget, parentDescriptor kv.Descriptor, threshold int,
+	parentID uint64, parent executeSplitTarget, parentDescriptor kv.Descriptor, sizeThreshold int, qps, qpsThreshold float64,
 	newChild func(rangeID uint64) *kv.DurableRange,
 	meta *kv.Meta, kvService *server.KVService, adminService *server.AdminService,
 	startTicking func(*kv.DurableRange), splitExecutedCounter *prometheus.CounterVec,
@@ -202,7 +256,7 @@ func executeSplitIfRecommended(
 		return
 	}
 
-	splitKey, recommended, err := parent.MaybeSplitKey(threshold)
+	splitKey, recommended, err := parent.MaybeSplitKey(sizeThreshold, qps, qpsThreshold)
 	if err != nil || !recommended {
 		return
 	}
@@ -269,7 +323,7 @@ func executeSplitIfRecommended(
 // annExecuteSplitTarget is the vector-plane counterpart of executeSplitTarget: the subset
 // of *ann.DurableNode executeAnnSplitIfRecommended needs from the parent it is checking.
 type annExecuteSplitTarget interface {
-	MaybeSplitKey(threshold int) (string, bool, error)
+	MaybeSplitKey(sizeThreshold int, qps, qpsThreshold float64) (string, bool, error)
 	AllVectors() map[string]vector.Vector
 }
 
@@ -289,7 +343,7 @@ type annExecuteSplitTarget interface {
 // (parentID*10+1/+2) -- both planes' parent IDs currently happen to be 1, so *10 would
 // otherwise produce identical transport IDs (11/12) for two entirely different Raft groups.
 func executeAnnSplitIfRecommended(
-	parentID uint64, parent annExecuteSplitTarget, parentDescriptor ann.Descriptor, threshold int,
+	parentID uint64, parent annExecuteSplitTarget, parentDescriptor ann.Descriptor, sizeThreshold int, qps, qpsThreshold float64,
 	newChild func(rangeID uint64) *ann.DurableNode,
 	meta *ann.Meta, service *server.Service,
 	startTicking func(*ann.DurableNode), splitExecutedCounter *prometheus.CounterVec,
@@ -303,7 +357,7 @@ func executeAnnSplitIfRecommended(
 		return
 	}
 
-	splitKey, recommended, err := parent.MaybeSplitKey(threshold)
+	splitKey, recommended, err := parent.MaybeSplitKey(sizeThreshold, qps, qpsThreshold)
 	if err != nil || !recommended {
 		return
 	}
@@ -370,7 +424,8 @@ func main() {
 	closedTimestampInterval := flag.Duration("closed-timestamp-interval", 500*time.Millisecond, "how often a KV range leader proposes an advanced closed timestamp (see kv.DurableRange.AdvanceClosedTimestamp)")
 	closedTimestampLag := flag.Duration("closed-timestamp-lag", time.Second, "how far behind wall-clock now each advanced closed timestamp is set -- must exceed closed-timestamp-interval plus real replication latency, or a legitimate in-flight read could exceed the promise before it even reaches a follower")
 	splitCheckInterval := flag.Duration("split-check-interval", 5*time.Second, "how often each KV range's key count is checked against --split-threshold (see kv.ShouldSplit) -- decision only, does not execute a split")
-	splitThreshold := flag.Int("split-threshold", 100000, "key count above which a KV range is reported as recommending a split (consensa_kv_split_recommended)")
+	splitThreshold := flag.Int("split-threshold", 100000, "key count above which a range is reported as recommending a split (consensa_kv_split_recommended); 0 disables the size trigger entirely")
+	splitQPSThreshold := flag.Float64("split-qps-threshold", 0, "requests/sec above which a range is reported as recommending a split, independent of key count -- catches a range that is small but genuinely hot under a skewed access pattern; 0 (the default) disables this trigger, matching this project's previous size-only behavior")
 	leaseDuration := flag.Duration("lease-duration", 6*time.Second, "how long an automatically granted follower-read lease is valid for once committed")
 	leaseRenewBefore := flag.Duration("lease-renew-before", 3*time.Second, "renew a range's lease once less than this much validity remains, so a valid lease exists continuously rather than lapsing between grants")
 	authToken := flag.String("auth-token", "", "shared-secret bearer token Consensa/ConsensaKV calls must present (internal/auth); empty disables data-plane auth, matching this project's previous unauthenticated behavior")
@@ -600,14 +655,16 @@ func main() {
 		ticker := time.NewTicker(*splitCheckInterval)
 		defer ticker.Stop()
 		ranges := map[string]splitCheckRange{"1": leftRange, "2": rightRange}
+		tracker := newQPSTracker()
 		for {
 			select {
 			case <-stopSplitCheck:
 				return
 			case <-ticker.C:
-				checkSplitRecommendations(*splitThreshold, metricRegistry.SplitRecommended, ranges)
-				executeSplitIfRecommended(1, leftRange, leftDescriptor, *splitThreshold, newKVRange, meta, kvService, adminService, startTicking, metricRegistry.SplitExecuted, splitExecuted, splitInProgress, &splitMu)
-				executeSplitIfRecommended(2, rightRange, rightDescriptor, *splitThreshold, newKVRange, meta, kvService, adminService, startTicking, metricRegistry.SplitExecuted, splitExecuted, splitInProgress, &splitMu)
+				qps := map[string]float64{"1": tracker.rate("1", leftRange.RequestCount()), "2": tracker.rate("2", rightRange.RequestCount())}
+				checkSplitRecommendations(*splitThreshold, *splitQPSThreshold, qps, metricRegistry.SplitRecommended, ranges)
+				executeSplitIfRecommended(1, leftRange, leftDescriptor, *splitThreshold, qps["1"], *splitQPSThreshold, newKVRange, meta, kvService, adminService, startTicking, metricRegistry.SplitExecuted, splitExecuted, splitInProgress, &splitMu)
+				executeSplitIfRecommended(2, rightRange, rightDescriptor, *splitThreshold, qps["2"], *splitQPSThreshold, newKVRange, meta, kvService, adminService, startTicking, metricRegistry.SplitExecuted, splitExecuted, splitInProgress, &splitMu)
 			}
 		}
 	}()
@@ -684,12 +741,14 @@ func main() {
 	go func() {
 		ticker := time.NewTicker(*splitCheckInterval)
 		defer ticker.Stop()
+		tracker := newQPSTracker()
 		for {
 			select {
 			case <-stopAnnSplitCheck:
 				return
 			case <-ticker.C:
-				executeAnnSplitIfRecommended(1, node, vectorDescriptor, *splitThreshold, newAnnChild, service.Meta(), service, startTickingAnn, metricRegistry.SplitExecuted, annSplitExecuted, annSplitInProgress, &annSplitMu)
+				qps := tracker.rate("1", node.RequestCount())
+				executeAnnSplitIfRecommended(1, node, vectorDescriptor, *splitThreshold, qps, *splitQPSThreshold, newAnnChild, service.Meta(), service, startTickingAnn, metricRegistry.SplitExecuted, annSplitExecuted, annSplitInProgress, &annSplitMu)
 			}
 		}
 	}()

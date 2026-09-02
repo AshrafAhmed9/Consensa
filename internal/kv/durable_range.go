@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ashraf/consensa/internal/raft"
@@ -67,7 +68,22 @@ type DurableRange struct {
 	closedMu         sync.RWMutex
 	closedTimestamp  ClosedTimestamp
 	lastAppliedIndex uint64
+
+	// requestCount is a raw cumulative counter of Put/Delete/Get calls THIS replica has
+	// served, the same shape and reasoning as server.Service.requestCount
+	// (internal/server/service.go): a rate is a caller's job (sample the delta over a
+	// window), not this type's, since computing one needs a clock this type otherwise has
+	// no reason to depend on. It exists so a caller (cmd/consensa's split-check loop) can
+	// derive a real per-range QPS to feed SplitTrigger.QPS -- the size threshold alone
+	// cannot detect a range that is small by key count but genuinely hot under a skewed
+	// access pattern.
+	requestCount atomic.Uint64
 }
+
+// RequestCount returns the total number of Put/Delete/Get calls this replica has served
+// since it started -- see the requestCount field's own doc comment for why this is a raw
+// counter, not a rate.
+func (r *DurableRange) RequestCount() uint64 { return r.requestCount.Load() }
 
 // DurableRangeConfig names one replica's identity, group membership, and durable storage.
 type DurableRangeConfig struct {
@@ -205,6 +221,7 @@ func (r *DurableRange) AddPeerAddress(id raft.NodeID, address string) error {
 // leader, matching Host.Propose's contract -- see internal/ann.DurableNode.Insert's doc
 // comment for the client-retry pattern this requires.
 func (r *DurableRange) Put(key, value []byte) error {
+	r.requestCount.Add(1)
 	if err := validateRangeKey(key); err != nil {
 		return err
 	}
@@ -217,6 +234,7 @@ func (r *DurableRange) Put(key, value []byte) error {
 
 // Delete proposes a key removal. See Put for the leader contract.
 func (r *DurableRange) Delete(key []byte) error {
+	r.requestCount.Add(1)
 	if err := validateRangeKey(key); err != nil {
 		return err
 	}
@@ -237,6 +255,7 @@ func (r *DurableRange) Delete(key []byte) error {
 // applied graph is a valid answer), but it is NOT sufficient on its own to justify calling
 // the KV plane linearizable. A caller needing that guarantee wants ConsistentGet instead.
 func (r *DurableRange) Get(key []byte) ([]byte, error) {
+	r.requestCount.Add(1)
 	return r.db.Get(key, storage.HLC{WallTime: math.MaxInt64})
 }
 
@@ -276,12 +295,14 @@ func (r *DurableRange) AllKeys() (map[string][]byte, error) {
 // ShouldSplit separately. Like AllKeys, this is a local read of whatever this replica has
 // applied, not a Raft operation, and it only answers the decision question -- see
 // ShouldSplit's own doc comment for what still has to happen after this returns true.
-func (r *DurableRange) MaybeSplitKey(threshold int) ([]byte, bool, error) {
+// qps is the caller's own already-computed request rate for this range (see
+// RequestCount's doc comment for why this type does not compute one itself).
+func (r *DurableRange) MaybeSplitKey(sizeThreshold int, qps, qpsThreshold float64) ([]byte, bool, error) {
 	keys, err := r.AllKeys()
 	if err != nil {
 		return nil, false, err
 	}
-	splitKey, ok := ShouldSplit(threshold, keys)
+	splitKey, ok := ShouldSplit(SplitTrigger{SizeThreshold: sizeThreshold, QPS: qps, QPSThreshold: qpsThreshold}, keys)
 	return splitKey, ok, nil
 }
 
