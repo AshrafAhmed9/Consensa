@@ -12,6 +12,14 @@ type Participant interface {
 	Record(id string) (Record, bool)
 	WriteIntent(Intent) error
 	Resolve(Record) error
+	// PushedWriteTimestamp and RefreshReads implement the read-refresh path Prepare falls
+	// back to on ErrWriteBelowObservedRead (see Prepare's own doc comment) -- both pure
+	// queries, never durable writes, so a participant that cannot support refresh yet can
+	// implement them as PushedWriteTimestamp returning ts unchanged and RefreshReads
+	// always returning false, which degrades safely back to today's abort-and-retry
+	// behavior rather than a compile-time requirement every Participant must satisfy.
+	PushedWriteTimestamp(key []byte, ts Timestamp) Timestamp
+	RefreshReads(reads map[string]Timestamp, newTS Timestamp) bool
 }
 
 // Coordinator drives a minimal two-phase commit across participant stores.
@@ -26,6 +34,13 @@ func NewCoordinator(clock *Clock) *Coordinator { return &Coordinator{clock: cloc
 type WriteSet struct {
 	Store   Participant
 	Intents []Intent
+	// Reads names keys this participant's caller already read (via Store.RecordRead) at
+	// this same transaction's read timestamp. It is what makes read-refresh possible on
+	// an ErrWriteBelowObservedRead conflict (see Prepare's doc comment) -- without it,
+	// Prepare has no record of what this transaction itself has read and must always fall
+	// back to abort-and-retry. Optional: a WriteSet with no reads to protect just leaves
+	// this nil and refresh degrades to "nothing to invalidate," never blocking it.
+	Reads [][]byte
 }
 
 // Transaction is the coordinator's recoverable description of a prepared transaction.
@@ -40,9 +55,26 @@ type Transaction struct {
 // Prepare writes a pending record to the first participant and installs all provisional
 // intents. It never makes a value visible, so a failure can safely publish Aborted and
 // clean up every participant that was reached.
+//
+// On an ErrWriteBelowObservedRead conflict, Prepare attempts one read-refresh (the piece
+// docs/notes/14-serializable.md named as still missing) before falling back to abort: it
+// computes how far the whole transaction's timestamp would need to move to clear every
+// conflicting key at once (maxPushedTimestamp), asks every participant whether this
+// transaction's own prior reads are still valid at that later timestamp (refreshAll), and
+// if so retries every intent at the new timestamp instead of aborting and forcing the
+// caller to retry the whole transaction from scratch. This is deliberately a single
+// attempt, not a loop: a second conflict discovered during the retry itself (another
+// transaction committed in the narrow window between computing the push and re-installing)
+// falls back to abort like any other unresolvable conflict, rather than retrying
+// indefinitely against a workload that may never let it succeed.
 func (c *Coordinator) Prepare(id string, writes []WriteSet) (*Transaction, error) {
 	if id == "" || len(writes) == 0 || writes[0].Store == nil {
 		return nil, errors.New("txn: ID and first participant required")
+	}
+	for _, write := range writes {
+		if write.Store == nil {
+			return nil, errors.New("txn: nil participant")
+		}
 	}
 	ts := c.clock.Now()
 	txn := &Transaction{
@@ -50,29 +82,97 @@ func (c *Coordinator) Prepare(id string, writes []WriteSet) (*Transaction, error
 		Anchor:       writes[0].Store,
 		Participants: make([]Participant, 0, len(writes)),
 	}
+	for _, write := range writes {
+		txn.Participants = append(txn.Participants, write.Store)
+	}
 	if err := txn.Anchor.PutRecord(txn.Record); err != nil {
 		return nil, err
 	}
-	for _, write := range writes {
-		if write.Store == nil {
+	if err := c.installIntents(id, writes, ts); err != nil {
+		if !errors.Is(err, ErrWriteBelowObservedRead) {
 			txn.Record.Status = Aborted
 			_ = txn.Anchor.PutRecord(txn.Record)
 			_ = c.Resolve(txn)
-			return nil, errors.New("txn: nil participant")
+			return nil, err
 		}
-		txn.Participants = append(txn.Participants, write.Store)
+		pushed := c.maxPushedTimestamp(writes, ts)
+		if !c.refreshAll(writes, ts, pushed) {
+			txn.Record.Status = Aborted
+			_ = txn.Anchor.PutRecord(txn.Record)
+			_ = c.Resolve(txn)
+			return nil, err
+		}
+		if err := c.installIntents(id, writes, pushed); err != nil {
+			txn.Record.Status = Aborted
+			_ = txn.Anchor.PutRecord(txn.Record)
+			_ = c.Resolve(txn)
+			return nil, err
+		}
+		ts = pushed
+		txn.Record.ReadTimestamp = ts
+		txn.Record.WriteTimestamp = ts
+		if err := txn.Anchor.PutRecord(txn.Record); err != nil {
+			return nil, err
+		}
+	}
+	return txn, nil
+}
+
+// installIntents proposes every write set's intents at ts. It is called twice by a
+// refreshed Prepare (once at the original timestamp, once at the pushed one) -- safe
+// because WriteIntent allows a participant's own transaction ID to overwrite its own
+// prior intent on the same key (see WriteIntent's own doc comment), so re-proposing an
+// intent that already installed cleanly at the old timestamp is a harmless no-op write,
+// not a conflict.
+func (c *Coordinator) installIntents(id string, writes []WriteSet, ts Timestamp) error {
+	for _, write := range writes {
 		for _, intent := range write.Intents {
 			intent.TxnID = id
 			intent.Timestamp = ts
 			if err := write.Store.WriteIntent(intent); err != nil {
-				txn.Record.Status = Aborted
-				_ = txn.Anchor.PutRecord(txn.Record)
-				_ = c.Resolve(txn)
-				return nil, err
+				return err
 			}
 		}
 	}
-	return txn, nil
+	return nil
+}
+
+// maxPushedTimestamp asks every participant what timestamp each of its intents would need
+// to clear WriteIntent's observed-read check, and returns the latest of them -- the single
+// timestamp a refreshed retry must use so every intent across every participant clears at
+// once, not just the one that happened to conflict first.
+func (c *Coordinator) maxPushedTimestamp(writes []WriteSet, ts Timestamp) Timestamp {
+	max := ts
+	for _, write := range writes {
+		for _, intent := range write.Intents {
+			if pushed := write.Store.PushedWriteTimestamp(intent.Key, ts); pushed.Compare(max) > 0 {
+				max = pushed
+			}
+		}
+	}
+	return max
+}
+
+// refreshAll asks every participant to validate its share of this transaction's read set
+// (WriteSet.Reads) against the pushed timestamp, using the original read timestamp as the
+// floor below which a conflicting write would have already been visible to this
+// transaction anyway. Any participant reporting even one stale read fails the whole
+// refresh -- serializability needs every read this transaction relied on to still be
+// current at the timestamp it is about to commit at, not just a majority of them.
+func (c *Coordinator) refreshAll(writes []WriteSet, originalTS, pushed Timestamp) bool {
+	for _, write := range writes {
+		if len(write.Reads) == 0 {
+			continue
+		}
+		reads := make(map[string]Timestamp, len(write.Reads))
+		for _, key := range write.Reads {
+			reads[string(key)] = originalTS
+		}
+		if !write.Store.RefreshReads(reads, pushed) {
+			return false
+		}
+	}
+	return true
 }
 
 // CommitRecord performs the transaction's atomic commit point. In the final range-backed

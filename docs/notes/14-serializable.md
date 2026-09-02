@@ -64,3 +64,31 @@ blocking unrelated writes.
   re-validate its own prior reads at the new timestamp and continue if nothing changed,
   rather than aborting outright. That refinement is not implemented -- this closes
   detection and rejection, not the friendlier retry-without-full-abort path.
+
+**Update: read-refresh is now implemented for `Store` and `Coordinator`.** On an
+`ErrWriteBelowObservedRead` conflict, `Coordinator.Prepare` no longer aborts
+immediately: it computes the single timestamp every conflicting intent across every
+participant would need (`maxPushedTimestamp`), asks each participant to validate the
+transaction's own prior reads (`WriteSet.Reads`) are still current at that later
+timestamp (`Store.RefreshReads`), and if so retries every intent at the pushed timestamp
+instead of forcing a full abort-and-retry. `RefreshReads` is a timestamp-overlap check
+against each key's last *committed* write time (`Store.lastWrite`), not a value-equality
+check -- the same proxy real SSI implementations use, since two different writes landing
+on the identical byte value still have to be treated as a conflict for the argument to
+stay correct in general. `TestPrepareRefreshesInsteadOfAbortingWhenPriorReadsStillHold`
+proves the happy path: T1's own unrelated prior read survives refresh and its write
+commits at a pushed timestamp past the conflicting read.
+`TestPrepareAbortsWhenRefreshFindsAStaleRead` proves the negative: if something else
+genuinely wrote a key T1 read in the intervening window, refresh correctly still fails
+and Prepare still aborts -- refresh only papers over the "prove it's still safe" case,
+never the "just got lucky" case. This is deliberately a single attempt, not a retry
+loop -- see `Coordinator.Prepare`'s own doc comment for why.
+
+**What this still does not do, stated plainly:** `DurableStore` (the real,
+Raft-replicated `Participant`) does not implement read-refresh yet --
+`PushedWriteTimestamp`/`RefreshReads` are stubbed there to degrade safely back to
+today's abort-and-retry (see that file's own doc comment), because a durable
+last-committed-write-timestamp index needs the same kind of durable index
+`readPrefix`/`intentKeysIndex` already are for other pieces of this file, which is real,
+separate work. `Store` proves the mechanism is correct; wiring the durable equivalent is
+the next step, not done here.

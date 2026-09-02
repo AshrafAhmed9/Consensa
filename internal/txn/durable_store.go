@@ -119,6 +119,18 @@ func (d *DurableStore) Record(id string) (Record, bool) {
 	return record, true
 }
 
+// PushedWriteTimestamp and RefreshReads deliberately do NOT implement read-refresh for
+// DurableStore yet -- returning ts unchanged and false respectively means
+// Coordinator.Prepare's refresh attempt (see its own doc comment) always fails fast and
+// falls back to today's abort-and-retry behavior, exactly the same outcome as before this
+// primitive existed. Store (intent.go) proves the mechanism itself works; wiring the
+// durable equivalent needs a real per-key last-committed-write timestamp durably indexed
+// the same way readPrefix/intentKeysIndex are here, which is real, separate work -- see
+// docs/notes/14-serializable.md for the honest accounting of what's proven versus what's
+// still a documented gap.
+func (d *DurableStore) PushedWriteTimestamp(_ []byte, ts Timestamp) Timestamp { return ts }
+func (d *DurableStore) RefreshReads(_ map[string]Timestamp, _ Timestamp) bool { return false }
+
 // WriteIntent durably proposes a provisional key/value for a pending transaction, and
 // records the key in that transaction's intent-key index so Resolve can find it again --
 // unlike Store's in-memory map, a real range has no cheap way to enumerate "every intent

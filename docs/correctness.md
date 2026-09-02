@@ -205,16 +205,24 @@ does *not* prove) lives — this section is a current index, not a replacement f
   real 3-node group: `TestFollowerReadServesOnceLeasedAndClosed` checks every rejection
   path (no lease; lease but no closed timestamp; a replica that isn't the lease's
   intended holder) as well as a follower correctly answering a read from local storage
-  alone. Still open: lease revocation on leadership change, and a production policy for
-  how often to advance the closed timestamp — no running binary calls it on a real
-  interval yet. See `docs/notes/09-leases.md` and ADR-009.
-- **A reproduced write-skew anomaly is actually prevented, not just documented.**
+  alone. `cmd/consensa` now advances the closed timestamp and grants/renews leases on a
+  real interval automatically (`maintainLeases`, `advanceClosedTimestamps`). Still open:
+  lease revocation on leadership change, and an RPC surface exposing `FollowerRead` to a
+  network client. See `docs/notes/09-leases.md` and ADR-009.
+- **A reproduced write-skew anomaly is actually prevented, not just documented — and a
+  pushed transaction can now read-refresh and commit instead of always aborting.**
   `Store.WriteIntent` and `DurableStore.WriteIntent` both reject a write whose timestamp
   collides with an already-recorded read on the same key — the classic two-doctors-on-call
   anomaly is reproduced end to end and the specific write that would complete it is
-  rejected (`TestWriteIntentRejectsWriteSkew`, `TestDurableStoreRejectsWriteSkew`). This is
-  the conservative reject-and-retry response, not full SSI's more permissive schedule
-  analysis or read-refresh. See `docs/notes/14-serializable.md`.
+  rejected (`TestWriteIntentRejectsWriteSkew`, `TestDurableStoreRejectsWriteSkew`).
+  `Coordinator.Prepare` no longer treats that rejection as an automatic abort: it
+  computes the pushed timestamp every conflicting intent needs, asks each participant to
+  validate the transaction's own prior reads are still current there
+  (`Store.RefreshReads`), and only aborts if that validation actually fails
+  (`TestPrepareRefreshesInsteadOfAbortingWhenPriorReadsStillHold`,
+  `TestPrepareAbortsWhenRefreshFindsAStaleRead`). Proven for the in-memory `Store`;
+  `DurableStore` still degrades to abort-and-retry, stated plainly rather than implied.
+  See `docs/notes/14-serializable.md`.
 - **TLA+ now covers joint-consensus quorum intersection and recursive range splitting**,
   each checked by TLC with a required negative-control variant that must fail — proving
   the checker itself is discriminating, not just that the correct model happens to pass.
