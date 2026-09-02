@@ -147,3 +147,75 @@ adapters. Do not read the tests and manual verification above as proof of the fu
 distributed-systems claim in the README; they are proof that the actual shipped artifact
 — not just its component packages in isolation — does what the README claims for the
 pieces it covers.
+
+## Later update: sharding, transactions, membership changes, and the read-path ladder
+
+Everything below was closed in later sessions, after the account above was written. Each
+item names its own test and the doc where the full account (including what it deliberately
+does *not* prove) lives — this section is a current index, not a replacement for those.
+
+- **Cross-range transactions are real and reachable over gRPC.** `internal/txn`'s 2PC
+  coordinator (HLC timestamps, write intents, a transaction record as the sole atomic
+  commit point) runs unmodified over both an in-memory `Store` and a Raft-backed
+  `DurableStore`. `TestCoordinatorCommitsAcrossRealRaftRanges` proves a transaction
+  committing across two genuinely separate 3-node `kv.DurableRange` groups;
+  `TestTransactionalPutCommitsAcrossRealRangesOverGRPC` proves the same thing driven by a
+  real network client through `ConsensaKV.TransactionalPut`. See
+  `docs/adr/008-wire-txn-onto-durable-ranges.md` and `docs/notes/08-transactions.md`.
+- **Live range splits preserve correctness on both planes.** `TestLiveSplitPreservesSearchCorrectness`
+  (vector) and `TestLiveSplitPreservesKVCorrectness` (KV) each split a real 3-node group
+  into two fresh 3-node child groups by rebuilding from the parent's actual applied data,
+  and prove no record lost or duplicated and no cross-boundary leakage in either child.
+  `ShouldSplit`/`DurableRange.MaybeSplitKey` close the split-*trigger decision* (a real
+  size threshold picking the median key of the range's actual data,
+  `TestMaybeSplitKeyDrivesARealLiveSplit`) — not automatic execution or live traffic
+  cutover, which remain open. See `docs/notes/12-split-repair.md`.
+- **Multi-range outbound connections are pooled.** Ranges on one node sharing a
+  destination reuse one persistent TCP connection instead of dialing per message
+  (`TestMultiplexedTransportPoolsOutboundConnections`). Making the receiving side read
+  many frames per connection surfaced and fixed two real bugs: a `bufio.Reader`
+  re-wrapped on every read that silently dropped bytes, and cross-range head-of-line
+  blocking from dispatching a received frame synchronously off the shared connection's
+  one read goroutine. See `docs/notes/07-multiraft.md`.
+- **Learners and full joint-consensus membership changes are wired into the live quorum
+  path.** `Config.Learners` marks replicating-but-non-voting peers, proven not to count
+  toward commit quorum even when they'd otherwise form a literal majority
+  (`TestCommitNeverAdvancesOnLearnerAcksAlone`). On top of that, `ProposeConfChange`
+  drives Raft's real two-phase joint-consensus protocol: a config-change entry takes
+  effect the moment it's *appended* to a replica's own log, not once committed (the
+  specific rule that makes the protocol safe); during the joint phase, both elections and
+  commits require a majority of the old configuration *and* a majority of the new one
+  separately, closing the exact disjoint-majority failure mode joint consensus exists to
+  prevent (`TestJointConfigRejectsDisjointMajorities`); the transition finalizes
+  automatically once the joint entry commits, and a leader that removes itself steps down
+  (`TestJointTransitionCompletesAndFinalizesAutomatically`,
+  `TestRemovedLeaderStepsDown`). Config state survives snapshots and leader crashes
+  mid-transition. Scope, stated plainly: this reconfigures replicas already known to a
+  group's static transport peer set; provisioning a genuinely new process, publishing its
+  address, and updating client routing is separate, unbuilt work. See
+  `docs/adr/010-learners.md`.
+  A real performance regression was found and fixed while closing this: recomputing
+  membership from the full log on every heartbeat and every proposed write (not just
+  actual config changes) was cheap in unit tests but measurably destabilized leadership
+  under the sustained write load of `cmd/consensa`'s own three-process end-to-end test in
+  CI — caught as an actual CI failure (`raft: proposal to non-leader`), not by inspection,
+  and fixed by only recomputing when a log change could actually affect membership.
+- **The read-path ladder closes end to end.** Lease grants, closed-timestamp advancement,
+  and `DurableRange.FollowerRead` are real Raft-replicated operations proven against a
+  real 3-node group: `TestFollowerReadServesOnceLeasedAndClosed` checks every rejection
+  path (no lease; lease but no closed timestamp; a replica that isn't the lease's
+  intended holder) as well as a follower correctly answering a read from local storage
+  alone. Still open: lease revocation on leadership change, and a production policy for
+  how often to advance the closed timestamp — no running binary calls it on a real
+  interval yet. See `docs/notes/09-leases.md` and ADR-009.
+- **A reproduced write-skew anomaly is actually prevented, not just documented.**
+  `Store.WriteIntent` and `DurableStore.WriteIntent` both reject a write whose timestamp
+  collides with an already-recorded read on the same key — the classic two-doctors-on-call
+  anomaly is reproduced end to end and the specific write that would complete it is
+  rejected (`TestWriteIntentRejectsWriteSkew`, `TestDurableStoreRejectsWriteSkew`). This is
+  the conservative reject-and-retry response, not full SSI's more permissive schedule
+  analysis or read-refresh. See `docs/notes/14-serializable.md`.
+- **TLA+ now covers joint-consensus quorum intersection and recursive range splitting**,
+  each checked by TLC with a required negative-control variant that must fail — proving
+  the checker itself is discriminating, not just that the correct model happens to pass.
+  See `specs/README.md`.
