@@ -36,3 +36,39 @@ message TransactionalPutRequest {
   map<string, bytes> writes = 2;
 }
 message TransactionalPutResponse {}
+
+// ConsensaAdmin is a separate service again, for the same reason ConsensaKV is separate
+// from Consensa: it exposes a different, unrelated primitive -- internal/raft's joint-
+// consensus membership-change primitives (Host.AddKnownPeer, Host.AddPeer,
+// DurableRange.ProposeConfChange), proven in internal/raft/new_node_join_test.go against
+// real processes but until this service nothing reachable over the network could ever
+// drive them. Like every other RPC in this codebase, this is deliberately unauthenticated
+// -- there is no auth layer anywhere in this project yet, and adding one only for this
+// service would imply a false sense of protection nothing else here actually has. A real
+// deployment would need to put this behind a real auth layer before exposing it publicly;
+// that is separate, unbuilt work, stated here rather than left implied.
+service ConsensaAdmin {
+  // AddReplica registers a new (possibly brand-new, previously-unknown) node's ID and
+  // transport address on the named range, so a subsequent PromoteReplica call naming that
+  // ID can succeed -- see kv.DurableRange.AddKnownPeer/AddPeerAddress's own doc comments
+  // for why these are two separate, local, per-replica steps rather than one RPC.
+  rpc AddReplica(AddReplicaRequest) returns (AddReplicaResponse);
+  // PromoteReplica drives kv.DurableRange.ProposeConfChange against the named range's
+  // current leader, moving it through Raft's joint-consensus protocol to the requested
+  // voter/learner sets. It fails if this node isn't currently that range's leader --
+  // callers should retry against a different node, mirroring TransactionalPut's own
+  // "route to whoever's actually in charge" contract.
+  rpc PromoteReplica(PromoteReplicaRequest) returns (PromoteReplicaResponse);
+}
+message AddReplicaRequest {
+  uint64 range_id = 1;
+  uint64 node_id = 2;
+  string address = 3;
+}
+message AddReplicaResponse {}
+message PromoteReplicaRequest {
+  uint64 range_id = 1;
+  repeated uint64 voter_ids = 2;
+  repeated uint64 learner_ids = 3;
+}
+message PromoteReplicaResponse {}

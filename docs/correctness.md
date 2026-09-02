@@ -196,9 +196,14 @@ does *not* prove) lives — this section is a current index, not a replacement f
   eligibility check, the other registers the new process's real transport address) let a
   fourth real `*Host`, started only after the other three already elected a leader and
   committed real entries, join as a learner over a real TCP connection and get promoted
-  to a full voter (`TestBrandNewProcessJoinsLiveGroupAsLearnerThenVoter`). Still unbuilt:
-  no authenticated admin RPC surface triggers any of this over the network, and updating
-  client routing after a membership change is separate work. See `docs/adr/010-learners.md`.
+  to a full voter (`TestBrandNewProcessJoinsLiveGroupAsLearnerThenVoter`). This is now
+  reachable over real gRPC too, not just direct Go calls: `ConsensaAdmin.AddReplica`/
+  `PromoteReplica` (`internal/server/admin_service.go`) expose the identical sequence,
+  proven end to end by `TestAdminServiceAddsAndPromotesReplicaOverGRPC` -- deliberately
+  unauthenticated, matching every other RPC in this codebase, since there is no auth
+  layer anywhere in this project yet. Still unbuilt: any auth layer at all, bootstrap
+  discovery of which address to call, and updating client routing after a membership
+  change. See `docs/adr/010-learners.md`.
   A real performance regression was found and fixed while closing this: recomputing
   membership from the full log on every heartbeat and every proposed write (not just
   actual config changes) was cheap in unit tests but measurably destabilized leadership

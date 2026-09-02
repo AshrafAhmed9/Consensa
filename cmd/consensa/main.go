@@ -224,6 +224,7 @@ func main() {
 		txn.NewCoordinator(txn.NewClock(time.Now)),
 		map[uint64]txn.Participant{1: txn.NewDurableStore(leftRange), 2: txn.NewDurableStore(rightRange)},
 	)
+	adminService := server.NewAdminService(map[uint64]server.MembershipTarget{1: leftRange, 2: rightRange})
 
 	metricRegistry := metrics.NewRegistry()
 
@@ -369,6 +370,7 @@ func main() {
 	grpcServer := grpc.NewServer()
 	consensav1.RegisterConsensaServer(grpcServer, service)
 	consensav1.RegisterConsensaKVServer(grpcServer, kvService)
+	consensav1.RegisterConsensaAdminServer(grpcServer, adminService)
 	slog.Info("consensa node started", "node_id", selfID, "raft_address", selfAddr, "grpc_address", *grpcListen, "metrics_address", *metricsListen, "data_dir", *dataDir, "kv_split_key", *kvSplitKey, "raft_groups", 3)
 	if err := grpcServer.Serve(listener); err != nil {
 		fatal("gRPC server stopped", "error", err)
