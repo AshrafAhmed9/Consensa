@@ -12,23 +12,29 @@ import (
 	consensav1 "github.com/ashraf/consensa/api/consensa/v1"
 )
 
-// splitExecutedForParent polls /metrics until a consensa_kv_split_executed_total series
-// for parentID appears with a nonzero value, or fails the test at deadline. Unlike
-// raftTermFromMetrics's exact-line match, this is a prefix match against the labeled
-// series name, since the counter's full label set (left_range_id/right_range_id) is
-// exactly what this test does NOT want to hardcode -- it only cares that the DECISION
-// this specific parent's threshold crossing) turned into a completed EXECUTION.
-func splitExecutedForParent(t *testing.T, metricAddr string, parentID int, deadline time.Duration) {
+// splitExecutedForParent polls every given node's /metrics until a
+// consensa_kv_split_executed_total series for parentID appears with a nonzero value on
+// AT LEAST ONE of them, or fails the test at deadline. Checking only one specific node
+// would be wrong: which of the three processes actually completes the migration depends
+// on which one's own local replica wins the new child group's leadership, which is not
+// deterministically any particular node -- executeSplitIfRecommended's own doc comment
+// explains why every process runs the identical check independently rather than one
+// coordinator deciding. Unlike raftTermFromMetrics's exact-line match, this is a prefix
+// match against the labeled series name, since the counter's full label set
+// (left_range_id/right_range_id) is exactly what this test does NOT want to hardcode.
+func splitExecutedForParent(t *testing.T, metricAddrs []string, parentID int, deadline time.Duration) {
 	t.Helper()
 	prefix := fmt.Sprintf(`consensa_kv_split_executed_total{parent_range_id="%d"`, parentID)
 	end := time.Now().Add(deadline)
 	for time.Now().Before(end) {
-		if metricLineExists(t, metricAddr, prefix) {
-			return
+		for _, addr := range metricAddrs {
+			if metricLineExists(t, addr, prefix) {
+				return
+			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("no %s* series appeared in /metrics from %s within %s -- live split never executed", prefix, metricAddr, deadline)
+	t.Fatalf("no %s* series appeared on any of %v within %s -- live split never executed", prefix, metricAddrs, deadline)
 }
 
 func metricLineExists(t *testing.T, metricAddr, prefix string) bool {
@@ -110,7 +116,11 @@ func TestConsensaBinaryExecutesALiveSplitAutomatically(t *testing.T) {
 		transactionalPutUntilAccepted(t, kvClients, fmt.Sprintf("seed-%d", i), map[string][]byte{key: []byte("v")}, 40*time.Second)
 	}
 
-	splitExecutedForParent(t, nodes[1].metricAddr, 1, 30*time.Second)
+	var metricAddrs []string
+	for _, id := range ids {
+		metricAddrs = append(metricAddrs, nodes[id].metricAddr)
+	}
+	splitExecutedForParent(t, metricAddrs, 1, 30*time.Second)
 
 	// New writes spanning both sides of the original "m" boundary must keep succeeding
 	// now that range 1 has been replaced by two fresh children in every process's

@@ -184,7 +184,16 @@ func executeSplitIfRecommended(
 	}
 	left, right := children[0], children[1]
 
-	leftDesc, rightDesc, err := kv.ExecuteLiveSplit(parentDescriptor, parentData, splitKey, leftID, rightID, left, right, 20*time.Second)
+	// A short per-key timeout, not a generous one: this whole function is already
+	// retried by the caller every --split-check-interval, so a slow per-key budget here
+	// just makes one failed attempt (this process's local child replica isn't leader
+	// this round) block for far longer than useful before the next scheduled retry gets
+	// a chance -- with several keys, a 20s-per-key budget could keep one call blocked
+	// for over a minute even though the real leader (a different process) might finish
+	// in milliseconds. Found as a real CI failure: the split never completed within a
+	// generous overall test deadline because each unsuccessful attempt was burning
+	// nearly all of it on its own.
+	leftDesc, rightDesc, err := kv.ExecuteLiveSplit(parentDescriptor, parentData, splitKey, leftID, rightID, left, right, 2*time.Second)
 	if err != nil {
 		slog.Error("live split: migration failed, will retry against the same child ranges next tick", "range_id", parentID, "error", err)
 		return
