@@ -55,6 +55,18 @@ claim.
 ## Try it
 
 ```sh
+./demo.sh
+```
+
+brings up a real 3-node cluster, upserts and searches vectors, commits a cross-range
+transaction, kills a node's real process, shows the surviving majority still answers
+correctly, then restarts the killed node and shows it recovers from its own on-disk log
+-- printing real Prometheus metrics scraped from a live process at the end. It uses
+[`cmd/democlient`](cmd/democlient), a small real gRPC client, not a mock.
+
+Or run nodes by hand:
+
+```sh
 go run ./cmd/consensa -id 1 -peers "1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003" \
   -data-dir /tmp/consensa1 -grpc-listen :8081 -metrics-listen :9091 -dimension 3
 # repeat for -id 2 and -id 3 with their own --data-dir/--grpc-listen/--metrics-listen
@@ -116,9 +128,13 @@ Stated plainly rather than left implied: no automatic trigger fires a range spli
 own (the decision logic is proven, nothing calls it on a timer); no live traffic cutover
 mid-split; joint consensus can reconfigure replicas already known to a group, but there's
 no workflow yet for provisioning a brand-new process and publishing its address; snapshot
-isolation is upgraded to reject write skew but isn't full serializability; follower reads
-work end to end but no running binary advances the closed timestamp on a real interval
-yet. See `docs/correctness.md` for the complete, current list.
+isolation is upgraded to reject write skew but isn't full serializability; a running
+binary now advances the closed timestamp on a real interval, but nothing yet grants a
+follower a lease automatically. A real, intermittent limitation found and documented this
+session: a cross-range transaction only commits through whichever single process happens
+to lead every range it touches, which real network jitter can leave stably split across
+processes with no server-side forwarding to recover (`docs/bugs/003`). See
+`docs/correctness.md` for the complete, current list.
 
 ## Verification
 
