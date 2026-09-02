@@ -25,6 +25,7 @@ import (
 	"github.com/ashraf/consensa/internal/raft"
 	"github.com/ashraf/consensa/internal/server"
 	"github.com/ashraf/consensa/internal/txn"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
 )
@@ -49,6 +50,32 @@ func advanceClosedTimestamps(now time.Time, lag time.Duration, ranges ...closedT
 	}
 }
 
+// splitCheckRange is the subset of kv.DurableRange checkSplitRecommendations needs.
+type splitCheckRange interface {
+	MaybeSplitKey(threshold int) ([]byte, bool, error)
+}
+
+// checkSplitRecommendations runs kv.ShouldSplit's decision (via MaybeSplitKey) against
+// every named range and records the result as a gauge -- the piece
+// docs/notes/12-split-repair.md names as still missing: "nothing calls MaybeSplitKey on a
+// timer." This is still the decision only: nothing here executes a split. A rebuild-from-
+// scratch live split needs to stand up fresh child Raft groups at runtime (new listeners,
+// new storage directories, new IDs), which is real, separate orchestration work this
+// binary does not attempt -- see that same doc for the full accounting of what's proven
+// (the migration itself, KV and vector) versus what's still just a per-range signal here.
+// AllKeys is a full scan of the range's applied data (see its own doc comment), so this is
+// deliberately checked on a slower, separate cadence from Raft ticking and closed-timestamp
+// advancement, not on every tick.
+func checkSplitRecommendations(threshold int, gauge *prometheus.GaugeVec, ranges map[string]splitCheckRange) {
+	for rangeID, r := range ranges {
+		value := 0.0
+		if _, recommended, err := r.MaybeSplitKey(threshold); err == nil && recommended {
+			value = 1
+		}
+		gauge.WithLabelValues(rangeID).Set(value)
+	}
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	fatal := func(message string, args ...any) {
@@ -66,6 +93,8 @@ func main() {
 	kvSplitKey := flag.String("kv-split-key", "m", "static split key for the two durable transactional KV ranges")
 	closedTimestampInterval := flag.Duration("closed-timestamp-interval", 500*time.Millisecond, "how often a KV range leader proposes an advanced closed timestamp (see kv.DurableRange.AdvanceClosedTimestamp)")
 	closedTimestampLag := flag.Duration("closed-timestamp-lag", time.Second, "how far behind wall-clock now each advanced closed timestamp is set -- must exceed closed-timestamp-interval plus real replication latency, or a legitimate in-flight read could exceed the promise before it even reaches a follower")
+	splitCheckInterval := flag.Duration("split-check-interval", 5*time.Second, "how often each KV range's key count is checked against --split-threshold (see kv.ShouldSplit) -- decision only, does not execute a split")
+	splitThreshold := flag.Int("split-threshold", 100000, "key count above which a KV range is reported as recommending a split (consensa_kv_split_recommended)")
 	flag.Parse()
 
 	if *id == 0 {
@@ -213,6 +242,29 @@ func main() {
 		}
 	}()
 	defer close(stopTicking)
+
+	// A separate goroutine, unlike closed-timestamp advancement above: MaybeSplitKey only
+	// reads this replica's own storage.Engine directly (AllKeys, durable_range.go) and
+	// never calls Host.Propose, so it never contends for the same mutex the tick loop
+	// holds across a blocking network send -- the specific hazard that made the
+	// closed-timestamp check unsafe as a second goroutine. AllKeys is a full scan, so
+	// running it on its own slower cadence (default 5s) here, off the tick loop entirely,
+	// also keeps a large range's scan from ever delaying real-time Raft ticking.
+	stopSplitCheck := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(*splitCheckInterval)
+		defer ticker.Stop()
+		ranges := map[string]splitCheckRange{"1": leftRange, "2": rightRange}
+		for {
+			select {
+			case <-stopSplitCheck:
+				return
+			case <-ticker.C:
+				checkSplitRecommendations(*splitThreshold, metricRegistry.SplitRecommended, ranges)
+			}
+		}
+	}()
+	defer close(stopSplitCheck)
 
 	go func() {
 		mux := http.NewServeMux()
