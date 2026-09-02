@@ -50,6 +50,36 @@ func advanceClosedTimestamps(now time.Time, lag time.Duration, ranges ...closedT
 	}
 }
 
+// leaseRange is the subset of kv.DurableRange maintainLeases needs.
+type leaseRange interface {
+	Status() (raft.Role, uint64)
+	CurrentLease() kv.Lease
+	GrantLease(holder raft.NodeID, duration time.Duration) error
+}
+
+// maintainLeases closes the gap docs/notes/09-leases.md and the README named as still
+// missing: closed timestamps already advance on a real interval (advanceClosedTimestamps
+// above), but nothing granted the lease that FollowerRead requires in the first place. The
+// policy is deliberately the simplest one that is still self-correcting: whichever replica
+// is currently Raft leader grants itself a fresh lease once its current one is not valid
+// comfortably past renewBefore -- so a lease is renewed well before it actually expires
+// (avoiding a gap where no valid lease exists at all) without this function tracking any
+// state of its own between calls. A former leader that lost the role simply stops being
+// called with role == Leader on the next check; it never proposes a lease it can't commit,
+// since GrantLease (like Put) already no-ops non-leader proposals.
+func maintainLeases(now time.Time, holder raft.NodeID, duration, renewBefore time.Duration, ranges ...leaseRange) {
+	for _, r := range ranges {
+		if role, _ := r.Status(); role != raft.Leader {
+			continue
+		}
+		lease := r.CurrentLease()
+		if lease.Holder == holder && lease.Expiration.After(now.Add(renewBefore)) {
+			continue
+		}
+		_ = r.GrantLease(holder, duration)
+	}
+}
+
 // splitCheckRange is the subset of kv.DurableRange checkSplitRecommendations needs.
 type splitCheckRange interface {
 	MaybeSplitKey(threshold int) ([]byte, bool, error)
@@ -95,6 +125,8 @@ func main() {
 	closedTimestampLag := flag.Duration("closed-timestamp-lag", time.Second, "how far behind wall-clock now each advanced closed timestamp is set -- must exceed closed-timestamp-interval plus real replication latency, or a legitimate in-flight read could exceed the promise before it even reaches a follower")
 	splitCheckInterval := flag.Duration("split-check-interval", 5*time.Second, "how often each KV range's key count is checked against --split-threshold (see kv.ShouldSplit) -- decision only, does not execute a split")
 	splitThreshold := flag.Int("split-threshold", 100000, "key count above which a KV range is reported as recommending a split (consensa_kv_split_recommended)")
+	leaseDuration := flag.Duration("lease-duration", 6*time.Second, "how long an automatically granted follower-read lease is valid for once committed")
+	leaseRenewBefore := flag.Duration("lease-renew-before", 3*time.Second, "renew a range's lease once less than this much validity remains, so a valid lease exists continuously rather than lapsing between grants")
 	flag.Parse()
 
 	if *id == 0 {
@@ -232,6 +264,7 @@ func main() {
 				ticks++
 				if ticks%closedTimestampEveryNTicks == 0 {
 					advanceClosedTimestamps(time.Now(), *closedTimestampLag, leftRange, rightRange)
+					maintainLeases(time.Now(), raft.NodeID(*id), *leaseDuration, *leaseRenewBefore, leftRange, rightRange)
 				}
 				// Recall is reported separately by an external benchmark through
 				// /report-recall. RangeQPS is set separately below, since it is a rate over

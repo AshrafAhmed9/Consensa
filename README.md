@@ -133,11 +133,13 @@ binary ever triggers a real split against it, and no in-flight request mid-split
 redirected; joint consensus can reconfigure replicas already known to a group, but there's
 no workflow yet for provisioning a brand-new process and publishing its address; snapshot
 isolation is upgraded to reject write skew but isn't full serializability; a running
-binary now advances the closed timestamp on a real interval, but nothing yet grants a
-follower a lease automatically. A real, intermittent limitation found and documented this
-session: a cross-range transaction only commits through whichever single process happens
-to lead every range it touches, which real network jitter can leave stably split across
-processes with no server-side forwarding to recover (`docs/bugs/003`). See
+binary now advances the closed timestamp and automatically grants/renews follower-read
+leases on a real interval, but no RPC surface exposes follower reads to a network client
+yet. A real, intermittent limitation found and documented this session: a cross-range
+transaction only commits through whichever single process happens to lead every range it
+touches, which real network jitter can leave stably split across processes with no
+server-side forwarding to recover (`docs/bugs/003`, mitigated by widening the election
+stagger but not fixed). See
 `docs/correctness.md` for the complete, current list.
 
 ## Verification

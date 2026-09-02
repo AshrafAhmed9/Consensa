@@ -93,11 +93,25 @@ replicated and applied; and fails again on a replica that is not the lease's int
 holder (the leader itself) even though the identical closed timestamp has applied there
 too -- proving the check is genuinely per-holder, not "any caught-up replica."
 
-**What is still not built, stated plainly:** no policy for how often or how far behind
-"now" to call `AdvanceClosedTimestamp` -- left to the caller, and no caller in
-`cmd/consensa` calls it on a real interval yet, so this is proven at the `DurableRange`
-unit-test layer, not yet exercised by the running binary. No lease revocation or handoff
-on leadership change (a lease granted by a leader that then loses leadership is not
-actively invalidated -- it simply expires on its own clock). No RPC surface exposes
+**Update: `cmd/consensa` now advances closed timestamps and grants/renews leases on a
+real interval.** `advanceClosedTimestamps` and the newer `maintainLeases`
+(`cmd/consensa/main.go`) both run inside the same tick-count-gated goroutine as Raft
+ticking itself -- deliberately the same goroutine, not two: `GrantLease` and
+`AdvanceClosedTimestamp` both call `Host.Propose`, and a second goroutine independently
+calling `Propose` against the same `*raft.Host` doubles contention on the mutex
+`driveLocked` holds across a blocking network send (found as a real regression while
+wiring closed-timestamp advancement -- see that fix's own commit). `maintainLeases`'s
+policy: whichever replica is currently Raft leader grants itself a lease once its
+current one is not valid comfortably past `--lease-renew-before`, so a valid lease
+exists continuously without re-proposing one that's still fine.
+`TestMaintainLeasesGrantsAndRenewsOnlyOnLeader` proves both halves against a real 3-node
+group: the lease is granted and applied, and a second call while it's still comfortably
+valid produces no second proposal.
+
+**What is still not built, stated plainly:** no lease revocation or handoff on
+leadership change (a lease granted by a leader that then loses leadership is not
+actively invalidated -- it simply expires on its own clock, and the new leader's own
+`maintainLeases` call grants a fresh one once it notices). No RPC surface exposes
 `FollowerRead` to a network client the way `ConsensaKV.TransactionalPut` exposes 2PC;
-this closes the mechanism, not the client-facing API on top of it.
+this closes the mechanism and the automatic policy, not a client-facing API on top of
+it.
