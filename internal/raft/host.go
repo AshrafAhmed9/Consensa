@@ -185,6 +185,37 @@ func (h *Host) ProposeConfChange(newVoters, newLearners []NodeID) error {
 	return h.driveLocked()
 }
 
+// AddKnownPeer extends this Host's Node's local peer universe to include id -- the other
+// half of provisioning a genuinely new process, alongside AddPeer below (which handles
+// the transport address; this handles Raft's own ProposeConfChange eligibility check).
+// See Node.AddKnownPeer's own doc comment for why both are local, per-replica operations
+// that must be called on every existing replica, not just the leader.
+func (h *Host) AddKnownPeer(id NodeID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.node.AddKnownPeer(id)
+}
+
+// AddPeer registers address for peer id on this Host's underlying transport, so a message
+// to a NodeID just added via ProposeConfChange (e.g. a genuinely new process nothing in
+// this deployment has ever addressed before) can actually be delivered instead of failing
+// with "unknown peer address". This must be called on every existing replica before or
+// alongside the ProposeConfChange that introduces the new ID -- ProposeConfChange changes
+// Raft's own membership state, which is a separate, orthogonal concern from whether the
+// transport layer knows how to reach that ID's address; closing only one half would leave
+// a new voter or learner that Raft counts toward quorum but can never actually replicate
+// to. Returns an error if this Host's transport doesn't implement raft.PeerRegistrar --
+// true only for a caller-supplied Transport (config.Transport) that doesn't support it,
+// never for the transports NewHost builds itself (ListenTCP, MultiplexedTransport.Register).
+func (h *Host) AddPeer(id NodeID, address string) error {
+	registrar, ok := h.transport.(PeerRegistrar)
+	if !ok {
+		return errors.New("raft: this host's transport does not support adding peers")
+	}
+	registrar.AddPeer(id, address)
+	return nil
+}
+
 // ReadIndex confirms this leader still has a quorum before a linearizable read. It
 // replicates a reserved no-op and waits until that entry is locally applied; committing it
 // requires a current quorum, so an isolated former leader times out instead of serving a

@@ -190,10 +190,15 @@ does *not* prove) lives — this section is a current index, not a replacement f
   automatically once the joint entry commits, and a leader that removes itself steps down
   (`TestJointTransitionCompletesAndFinalizesAutomatically`,
   `TestRemovedLeaderStepsDown`). Config state survives snapshots and leader crashes
-  mid-transition. Scope, stated plainly: this reconfigures replicas already known to a
-  group's static transport peer set; provisioning a genuinely new process, publishing its
-  address, and updating client routing is separate, unbuilt work. See
-  `docs/adr/010-learners.md`.
+  mid-transition. Provisioning a genuinely new, previously-unknown process is now also
+  proven, not just reconfiguring already-known peers: `Node.AddKnownPeer`/`Host.AddPeer`
+  (a matching pair of local, per-replica primitives -- one extends `ProposeConfChange`'s
+  eligibility check, the other registers the new process's real transport address) let a
+  fourth real `*Host`, started only after the other three already elected a leader and
+  committed real entries, join as a learner over a real TCP connection and get promoted
+  to a full voter (`TestBrandNewProcessJoinsLiveGroupAsLearnerThenVoter`). Still unbuilt:
+  no authenticated admin RPC surface triggers any of this over the network, and updating
+  client routing after a membership change is separate work. See `docs/adr/010-learners.md`.
   A real performance regression was found and fixed while closing this: recomputing
   membership from the full log on every heartbeat and every proposed write (not just
   actual config changes) was cheap in unit tests but measurably destabilized leadership

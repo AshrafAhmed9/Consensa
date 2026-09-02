@@ -19,6 +19,7 @@ const maxMessageBytes = 16 << 20
 type TCPTransport struct {
 	id       NodeID
 	listener net.Listener
+	peersMu  sync.RWMutex
 	peers    map[NodeID]string
 	handle   func(Message) error
 	done     chan struct{}
@@ -46,10 +47,20 @@ func ListenTCP(id NodeID, address string, peers map[NodeID]string, handle func(M
 // Addr returns the bound listener address, including an OS-assigned port when requested.
 func (t *TCPTransport) Addr() net.Addr { return t.listener.Addr() }
 
+// AddPeer implements PeerRegistrar (transport.go) -- see that interface's doc comment.
+// Safe to call concurrently with Send: peersMu guards every access to peers.
+func (t *TCPTransport) AddPeer(id NodeID, address string) {
+	t.peersMu.Lock()
+	defer t.peersMu.Unlock()
+	t.peers[id] = address
+}
+
 // Send encodes one complete message frame and waits for the peer to receive it. The frame
 // limit prevents a malformed length prefix from allocating unbounded memory on a node.
 func (t *TCPTransport) Send(message Message) error {
+	t.peersMu.RLock()
 	address, ok := t.peers[message.To]
+	t.peersMu.RUnlock()
 	if !ok {
 		return errors.New("raft: unknown peer address")
 	}

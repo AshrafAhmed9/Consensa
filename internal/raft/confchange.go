@@ -170,14 +170,27 @@ func (n *node) votingPeers() []NodeID {
 // kind of case this project's own engineering rules say to reject outright rather than
 // guess at a resolution for.
 //
-// Every ID in newVoters and newLearners must already be a member of n.peers, the static,
-// transport-reachable universe this node was constructed with (see NewNode) -- adding a
-// genuinely new, previously-unknown node still requires the transport layer (raft.Host)
-// to learn its network address first, which is a separate concern this package
-// deliberately knows nothing about (see transport.go's own doc comment on that boundary).
-// Promoting an existing learner, or changing which of the already-known peers are
-// voters, is exactly what this closes; growing the cluster to a brand-new physical node
-// is not.
+// Every ID in newVoters and newLearners must already be a member of n.peers -- no longer
+// fixed at NewNode/RecoverNode construction time, since AddKnownPeer (above) can extend
+// it at runtime. Growing the cluster to a genuinely new physical node this deployment has
+// never addressed before needs both halves closed on every existing replica first: this
+// package's own AddKnownPeer (so ProposeConfChange will accept the ID at all) and the
+// transport layer's raft.Host.AddPeer (so a message to that ID can actually be delivered
+// -- see transport.go's PeerRegistrar for that half, which this package deliberately
+// still knows nothing about). Promoting an existing learner, or changing which of the
+// already-known peers are voters, needed neither extra step and still doesn't.
+// AddKnownPeer implements Node.AddKnownPeer -- see that interface method's doc comment.
+// It only extends n.peers (the message-routing/ProposeConfChange-eligibility universe);
+// Membership, the log, and quorum accounting are all untouched.
+func (n *node) AddKnownPeer(id NodeID) {
+	for _, p := range n.peers {
+		if p == id {
+			return
+		}
+	}
+	n.peers = append(n.peers, id)
+}
+
 func (n *node) ProposeConfChange(newVoters, newLearners []NodeID) error {
 	if n.role != Leader {
 		return errors.New("raft: confChange proposal to non-leader")

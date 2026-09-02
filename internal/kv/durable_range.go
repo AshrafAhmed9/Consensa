@@ -156,8 +156,33 @@ func (r *DurableRange) Tick() error { return r.host.Tick() }
 // ProposeConfChange changes voters among the transport-known peer universe. It is an
 // operator primitive: callers must first start and catch up a learner, then propose its
 // promotion through the current leader.
+//
+// "Transport-known" is the operative phrase: a genuinely new process this deployment has
+// never addressed before must have its address registered on every existing replica via
+// AddPeerAddress before (or alongside) this call adds its ID to the group -- see
+// AddPeerAddress's own doc comment for why these are two separate steps.
 func (r *DurableRange) ProposeConfChange(voters, learners []raft.NodeID) error {
 	return r.host.ProposeConfChange(voters, learners)
+}
+
+// AddKnownPeer extends this replica's local Raft peer universe to include id, the
+// companion step to AddPeerAddress below: ProposeConfChange rejects any ID not already
+// known (raft.Node.AddKnownPeer's own doc comment), so provisioning a genuinely new
+// process needs both this and AddPeerAddress called on every existing replica first.
+func (r *DurableRange) AddKnownPeer(id raft.NodeID) {
+	r.host.AddKnownPeer(id)
+}
+
+// AddPeerAddress registers a new replica's transport address on this replica, so that
+// once ProposeConfChange (above) adds that replica's ID to the group, real messages can
+// actually reach it. This is the piece docs/notes/11-joint-consensus.md named as
+// missing: "no workflow yet for provisioning a brand-new process and publishing its
+// address." It must be called on every existing replica -- not just the leader --
+// because every replica that ends up needing to send the new one a message (a heartbeat,
+// a snapshot, a vote request) independently needs its own transport to know the address;
+// there is no cluster-wide broadcast of this call.
+func (r *DurableRange) AddPeerAddress(id raft.NodeID, address string) error {
+	return r.host.AddPeer(id, address)
 }
 
 // Put proposes a key/value write. It only succeeds if this replica is currently the Raft

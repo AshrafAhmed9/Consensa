@@ -27,6 +27,15 @@ type Node interface {
 	// already in progress; the leave-joint follow-up that finalizes the transition is
 	// automatic once the joint entry itself commits, never a second caller-driven call.
 	ProposeConfChange(newVoters, newLearners []NodeID) error
+	// AddKnownPeer extends this replica's local peer universe (n.peers) to include id, a
+	// prerequisite ProposeConfChange enforces before it will let id join newVoters or
+	// newLearners -- see ProposeConfChange's own doc comment for why "known peer" and
+	// "current voter/learner" are deliberately different sets. Unlike ProposeConfChange,
+	// this is local, per-replica bookkeeping, not something Raft's commit protocol
+	// replicates: it touches neither Membership (quorum accounting is unchanged) nor the
+	// log, so it must be called independently on every existing replica, not just the
+	// leader. A no-op if id is already known.
+	AddKnownPeer(id NodeID)
 	Ready() Ready
 	Advance()
 	// Status reports this replica's own view of its role and term, for administrative

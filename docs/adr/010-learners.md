@@ -56,6 +56,28 @@ majority of *voters*.
 
 - `raft.Node` and `raft.Host` expose `ProposeConfChange`, but `DurableRange` and the
   shipped binary do not yet provide an authenticated admin API for it.
-- A change cannot introduce a previously unknown process: each target must already be in
-  the static `Config.Peers` transport universe. Bootstrap, address distribution, and
-  range-routing changes remain separate work.
+
+**Update: a genuinely new, previously-unknown process can now join a live group.**
+`ProposeConfChange`'s own eligibility check (every target ID must already be in
+`n.peers`) used to make this a hard requirement -- `Config.Peers` was fixed at
+construction, so growing a cluster to a physical node the deployment had never addressed
+before was explicitly out of scope (this section used to say so). Two new, local,
+per-replica primitives close it: `Node.AddKnownPeer`/`Host.AddKnownPeer` extend a
+replica's own peer universe so `ProposeConfChange` will accept the new ID at all, and
+`Host.AddPeer` (via the new `raft.PeerRegistrar` transport capability, implemented by
+both `*TCPTransport` and `*rangeView`) registers the new process's real network address
+so a message to it can actually be delivered. Neither call is replicated by Raft's own
+commit protocol -- both are local bookkeeping, deliberately mirroring each other, and
+both must be invoked on every existing replica, not just the leader, before the
+`ProposeConfChange` that adds the new ID to the voter or learner set.
+`TestBrandNewProcessJoinsLiveGroupAsLearnerThenVoter` proves the full sequence against
+three real, already-running `*Host` processes and a fourth started only afterward, with
+its ID and address unknown to any of the first three until these calls run: it joins as
+a learner, catches up over a real TCP connection AddPeer just made possible, and is then
+promoted to a full voter counted toward quorum.
+
+**What this still does not do, stated plainly:** no authenticated admin RPC surface
+calls any of this yet -- `AddKnownPeer`/`AddPeer`/`ProposeConfChange` are proven
+primitives, not something `cmd/consensa` or `kv.DurableRange`'s callers can trigger over
+the network. Bootstrap (how a fresh process learns which group to even try joining) and
+range-routing updates after a membership change remain separate, undone work.

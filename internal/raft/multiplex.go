@@ -224,6 +224,15 @@ func (v *rangeView) SetHandler(handler func(Message) error) {
 	v.mu.Unlock()
 }
 
+// AddPeer implements PeerRegistrar (transport.go) -- see that interface's doc comment.
+// Reuses the same mutex SetHandler/Send already share; the extra contention is
+// negligible against how rarely a membership change registers a brand-new address.
+func (v *rangeView) AddPeer(id NodeID, address string) {
+	v.mu.Lock()
+	v.peers[id] = address
+	v.mu.Unlock()
+}
+
 // Addr returns the shared listener's address -- identical for every range on this node.
 func (v *rangeView) Addr() net.Addr { return v.listener.Addr() }
 
@@ -243,7 +252,9 @@ func (v *rangeView) Close() error {
 // pooled connection -- reused by every other range on this node also sending to that same
 // peer, instead of TCPTransport.Send's per-message dial.
 func (v *rangeView) Send(message Message) error {
+	v.mu.Lock()
 	address, ok := v.peers[message.To]
+	v.mu.Unlock()
 	if !ok {
 		return errors.New("raft: unknown peer address")
 	}
