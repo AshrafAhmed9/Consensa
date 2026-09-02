@@ -29,6 +29,26 @@ import (
 	"google.golang.org/grpc"
 )
 
+// closedTimestampRange is the subset of kv.DurableRange advanceClosedTimestamps needs --
+// declared narrowly, matching internal/txn's own rangeClient pattern, so a test can drive
+// this exact logic against real kv.DurableRange leaders without pulling in the rest of
+// main's process wiring (transport, gRPC, metrics).
+type closedTimestampRange interface {
+	AdvanceClosedTimestamp(ts time.Time) error
+}
+
+// advanceClosedTimestamps proposes closedAt (now, minus a safety lag) as the new closed
+// timestamp on every range passed in. AdvanceClosedTimestamp is a no-op error on whichever
+// replica isn't currently leader -- exactly like Propose -- so calling this against every
+// replica in a deployment, not just "the leader," is correct and self-correcting across
+// leadership changes without this function needing to track who's leader itself.
+func advanceClosedTimestamps(now time.Time, lag time.Duration, ranges ...closedTimestampRange) {
+	closedAt := now.Add(-lag)
+	for _, r := range ranges {
+		_ = r.AdvanceClosedTimestamp(closedAt)
+	}
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	fatal := func(message string, args ...any) {
@@ -44,6 +64,8 @@ func main() {
 	metricsListen := flag.String("metrics-listen", ":9090", "Prometheus metrics listen address")
 	tickInterval := flag.Duration("tick-interval", 50*time.Millisecond, "how often this node advances its Raft clock")
 	kvSplitKey := flag.String("kv-split-key", "m", "static split key for the two durable transactional KV ranges")
+	closedTimestampInterval := flag.Duration("closed-timestamp-interval", 500*time.Millisecond, "how often a KV range leader proposes an advanced closed timestamp (see kv.DurableRange.AdvanceClosedTimestamp)")
+	closedTimestampLag := flag.Duration("closed-timestamp-lag", time.Second, "how far behind wall-clock now each advanced closed timestamp is set -- must exceed closed-timestamp-interval plus real replication latency, or a legitimate in-flight read could exceed the promise before it even reaches a follower")
 	flag.Parse()
 
 	if *id == 0 {
@@ -146,10 +168,27 @@ func main() {
 
 	// Raft only makes progress when something drives its clock; production wires that to
 	// a real timer instead of the deterministic simulator's stepped scheduler tests use.
+	//
+	// Closed-timestamp advancement (docs/notes/09-leases.md) is folded into this SAME
+	// loop and goroutine, on a tick-count gate, rather than its own separate ticker --
+	// deliberately, not for tidiness. A second goroutine independently calling Propose
+	// against the same *raft.Host instances this loop already ticks doubles concurrent
+	// pressure on Host's own internal mutex, which is held across a blocking network send
+	// (transport.Send inside driveLocked, host.go) -- found as a real regression in
+	// cmd/consensa's own three-process end-to-end test: a separate closed-timestamp
+	// goroutine at 500ms measurably destabilized leadership that the single-goroutine
+	// version never did, even after fixing an unrelated real O(log length) cost in
+	// raftLog.term (see that fix's own commit). One goroutine serializing everything it
+	// proposes is what keeps this safe.
+	closedTimestampEveryNTicks := int(*closedTimestampInterval / *tickInterval)
+	if closedTimestampEveryNTicks < 1 {
+		closedTimestampEveryNTicks = 1
+	}
 	stopTicking := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(*tickInterval)
 		defer ticker.Stop()
+		ticks := 0
 		for {
 			select {
 			case <-stopTicking:
@@ -161,6 +200,10 @@ func main() {
 				_ = node.Tick()
 				_ = leftRange.Tick()
 				_ = rightRange.Tick()
+				ticks++
+				if ticks%closedTimestampEveryNTicks == 0 {
+					advanceClosedTimestamps(time.Now(), *closedTimestampLag, leftRange, rightRange)
+				}
 				// Recall is reported separately by an external benchmark through
 				// /report-recall. RangeQPS is set separately below, since it is a rate over
 				// a fixed window rather than an instantaneous value like the Raft term.
@@ -170,6 +213,7 @@ func main() {
 		}
 	}()
 	defer close(stopTicking)
+
 	go func() {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promhttp.HandlerFor(metricRegistry.Registry, promhttp.HandlerOpts{}))
