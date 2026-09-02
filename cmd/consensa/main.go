@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	consensav1 "github.com/ashraf/consensa/api/consensa/v1"
@@ -86,16 +87,12 @@ type splitCheckRange interface {
 }
 
 // checkSplitRecommendations runs kv.ShouldSplit's decision (via MaybeSplitKey) against
-// every named range and records the result as a gauge -- the piece
-// docs/notes/12-split-repair.md names as still missing: "nothing calls MaybeSplitKey on a
-// timer." This is still the decision only: nothing here executes a split. A rebuild-from-
-// scratch live split needs to stand up fresh child Raft groups at runtime (new listeners,
-// new storage directories, new IDs), which is real, separate orchestration work this
-// binary does not attempt -- see that same doc for the full accounting of what's proven
-// (the migration itself, KV and vector) versus what's still just a per-range signal here.
-// AllKeys is a full scan of the range's applied data (see its own doc comment), so this is
-// deliberately checked on a slower, separate cadence from Raft ticking and closed-timestamp
-// advancement, not on every tick.
+// every named range and records the result as a gauge -- purely the decision signal,
+// updated regardless of whether execution has happened yet (see
+// consensa_kv_split_executed_total, set only by executeSplitIfRecommended below, for the
+// execution signal). AllKeys is a full scan of the range's applied data (see its own doc
+// comment), so this is deliberately checked on a slower, separate cadence from Raft
+// ticking and closed-timestamp advancement, not on every tick.
 func checkSplitRecommendations(threshold int, gauge *prometheus.GaugeVec, ranges map[string]splitCheckRange) {
 	for rangeID, r := range ranges {
 		value := 0.0
@@ -104,6 +101,119 @@ func checkSplitRecommendations(threshold int, gauge *prometheus.GaugeVec, ranges
 		}
 		gauge.WithLabelValues(rangeID).Set(value)
 	}
+}
+
+// executeSplitTarget is the subset of kv.DurableRange executeSplitIfRecommended needs
+// from the parent it is checking, beyond splitCheckRange's own MaybeSplitKey: AllKeys to
+// read the applied data kv.ExecuteLiveSplit migrates.
+type executeSplitTarget interface {
+	splitCheckRange
+	AllKeys() (map[string][]byte, error)
+}
+
+// executeSplitIfRecommended closes the gap checkSplitRecommendations' own doc comment
+// used to name as still missing: "nothing here executes a split." It stands up two fresh
+// child kv.DurableRange groups on THIS process's own already-shared MultiplexedTransport
+// -- newChild is cmd/consensa's own newKVRange closure, reused unmodified, since
+// registering a new range ID on an existing shared listener needs no new address or
+// listener at all -- migrates the parent's applied data via kv.ExecuteLiveSplit, then
+// publishes the new routing metadata and registers the fresh children with the running
+// KVService/AdminService so they're immediately reachable, not just replicated.
+//
+// No cross-process coordination call is needed to decide WHEN to split: every process in
+// the deployment runs this identical check against identical Raft-replicated applied
+// state (Raft guarantees all three replicas of a range apply the same committed entries
+// in the same order), so all three independently compute the identical split decision and
+// split key, and each independently builds and registers its own local replica of the
+// same two deterministic child IDs -- the same way the two original static ranges already
+// start on all three processes without any handshake between them. Only the migration
+// Put calls inside kv.ExecuteLiveSplit need a real leader, and its own retry already
+// tolerates that not being this particular process at the moment it runs.
+//
+// executed guards against re-running the split on every future tick once it has
+// succeeded once for this parentID -- required because MaybeSplitKey keeps recommending
+// a split for as long as the parent's own (now-stale) key count stays past threshold; the
+// parent range itself is deliberately left in place rather than deleted, matching
+// docs/notes/12-split-repair.md's own stated simplification.
+//
+// inProgress caches the two child ranges across retries of the SAME parentID -- required
+// because newChild opens each child's storage.Engine (via newKVRange, which calls this
+// process's own fatal() and exits on a real open error, the same as leftRange/rightRange
+// get at startup). A migration attempt that fails transiently (a child group's election
+// hasn't settled yet, a network blip) must retry against the SAME already-open child
+// objects on the next tick, not call newChild again for the same range ID: a second
+// concurrent storage.Open against a directory the first attempt's Host is still actively
+// using corrupts the WAL out from under it -- found as a real bug via
+// TestConsensaBinaryExecutesALiveSplitAutomatically ("storage: invalid SSTable record"
+// on the retry, then the whole process exiting via newKVRange's own fatal()).
+func executeSplitIfRecommended(
+	parentID uint64, parent executeSplitTarget, parentDescriptor kv.Descriptor, threshold int,
+	newChild func(rangeID uint64) *kv.DurableRange,
+	meta *kv.Meta, kvService *server.KVService, adminService *server.AdminService,
+	startTicking func(*kv.DurableRange), splitExecutedCounter *prometheus.CounterVec,
+	executed map[uint64]bool, inProgress map[uint64][2]*kv.DurableRange, mu *sync.Mutex,
+) {
+	mu.Lock()
+	alreadyDone := executed[parentID]
+	children, attemptStarted := inProgress[parentID]
+	mu.Unlock()
+	if alreadyDone {
+		return
+	}
+
+	splitKey, recommended, err := parent.MaybeSplitKey(threshold)
+	if err != nil || !recommended {
+		return
+	}
+	parentData, err := parent.AllKeys()
+	if err != nil {
+		slog.Error("live split: reading parent data", "range_id", parentID, "error", err)
+		return
+	}
+
+	leftID, rightID := parentID*10+1, parentID*10+2
+	if !attemptStarted {
+		left := newChild(leftID)
+		right := newChild(rightID)
+		startTicking(left)
+		startTicking(right)
+		children = [2]*kv.DurableRange{left, right}
+		mu.Lock()
+		inProgress[parentID] = children
+		mu.Unlock()
+	}
+	left, right := children[0], children[1]
+
+	leftDesc, rightDesc, err := kv.ExecuteLiveSplit(parentDescriptor, parentData, splitKey, leftID, rightID, left, right, 20*time.Second)
+	if err != nil {
+		slog.Error("live split: migration failed, will retry against the same child ranges next tick", "range_id", parentID, "error", err)
+		return
+	}
+
+	next := meta.All()
+	filtered := next[:0]
+	for _, d := range next {
+		if d.ID != parentID {
+			filtered = append(filtered, d)
+		}
+	}
+	filtered = append(filtered, leftDesc, rightDesc)
+	if err := meta.Replace(filtered); err != nil {
+		slog.Error("live split: publishing new routing metadata", "range_id", parentID, "error", err)
+		return
+	}
+
+	kvService.RegisterStore(leftID, txn.NewDurableStore(left))
+	kvService.RegisterStore(rightID, txn.NewDurableStore(right))
+	adminService.RegisterRange(leftID, left)
+	adminService.RegisterRange(rightID, right)
+
+	mu.Lock()
+	executed[parentID] = true
+	delete(inProgress, parentID)
+	mu.Unlock()
+	splitExecutedCounter.WithLabelValues(fmt.Sprint(parentID), fmt.Sprint(leftID), fmt.Sprint(rightID)).Inc()
+	slog.Info("live split executed", "parent_range_id", parentID, "left_range_id", leftID, "right_range_id", rightID, "split_key", string(splitKey))
 }
 
 func main() {
@@ -212,10 +322,9 @@ func main() {
 			slog.Error("closing durable KV range", "range_id", 2, "error", err)
 		}
 	}()
-	meta, err := kv.NewMeta([]kv.Descriptor{
-		{ID: 1, Start: nil, End: []byte(*kvSplitKey), Replicas: groupPeers},
-		{ID: 2, Start: []byte(*kvSplitKey), End: nil, Replicas: groupPeers},
-	})
+	leftDescriptor := kv.Descriptor{ID: 1, Start: nil, End: []byte(*kvSplitKey), Replicas: groupPeers}
+	rightDescriptor := kv.Descriptor{ID: 2, Start: []byte(*kvSplitKey), End: nil, Replicas: groupPeers}
+	meta, err := kv.NewMeta([]kv.Descriptor{leftDescriptor, rightDescriptor})
 	if err != nil {
 		fatal("creating KV range descriptors", "error", err)
 	}
@@ -277,13 +386,43 @@ func main() {
 	}()
 	defer close(stopTicking)
 
+	// startTicking gives a range constructed after startup (a live split's fresh
+	// children) the same real-timer-driven Tick() loop leftRange/rightRange get above,
+	// stopping on the identical stopTicking channel so a child's ticking goroutine never
+	// outlives the process. A dedicated goroutine per child, not a growable slice shared
+	// with the main tick loop above: that loop's own slice is captured once at
+	// construction, and racing a live append against its concurrent range-over read
+	// would be exactly the kind of data race Meta/KVService/AdminService's own new
+	// mutexes exist to avoid elsewhere in this file.
+	startTicking := func(r *kv.DurableRange) {
+		go func() {
+			ticker := time.NewTicker(*tickInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopTicking:
+					return
+				case <-ticker.C:
+					_ = r.Tick()
+				}
+			}
+		}()
+	}
+
 	// A separate goroutine, unlike closed-timestamp advancement above: MaybeSplitKey only
 	// reads this replica's own storage.Engine directly (AllKeys, durable_range.go) and
 	// never calls Host.Propose, so it never contends for the same mutex the tick loop
 	// holds across a blocking network send -- the specific hazard that made the
 	// closed-timestamp check unsafe as a second goroutine. AllKeys is a full scan, so
 	// running it on its own slower cadence (default 5s) here, off the tick loop entirely,
-	// also keeps a large range's scan from ever delaying real-time Raft ticking.
+	// also keeps a large range's scan from ever delaying real-time Raft ticking. Real
+	// split execution (executeSplitIfRecommended) runs on this same goroutine, not a
+	// third one: it can block for up to several seconds migrating data, which is fine to
+	// delay this goroutine's own next tick (splits are rare) but would be a real problem
+	// on the main Raft tick loop above.
+	splitExecuted := map[uint64]bool{}
+	splitInProgress := map[uint64][2]*kv.DurableRange{}
+	var splitMu sync.Mutex
 	stopSplitCheck := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(*splitCheckInterval)
@@ -295,6 +434,8 @@ func main() {
 				return
 			case <-ticker.C:
 				checkSplitRecommendations(*splitThreshold, metricRegistry.SplitRecommended, ranges)
+				executeSplitIfRecommended(1, leftRange, leftDescriptor, *splitThreshold, newKVRange, meta, kvService, adminService, startTicking, metricRegistry.SplitExecuted, splitExecuted, splitInProgress, &splitMu)
+				executeSplitIfRecommended(2, rightRange, rightDescriptor, *splitThreshold, newKVRange, meta, kvService, adminService, startTicking, metricRegistry.SplitExecuted, splitExecuted, splitInProgress, &splitMu)
 			}
 		}
 	}()

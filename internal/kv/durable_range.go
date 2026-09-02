@@ -17,6 +17,22 @@ import (
 // so it is rejected here rather than merely documented as a caller's responsibility.
 var reservedKeyPrefix = []byte("raft/")
 
+// txnBookkeepingPrefix is internal/txn's own reserved namespace (recordPrefix,
+// intentPrefix, readPrefix, lastWritePrefix, intentKeysIndex all start with it) for a
+// DurableStore sharing this same DurableRange's keyspace -- see that package's own doc
+// comment on durable_store.go, which already documents this convention. Unlike
+// reservedKeyPrefix, this is NOT rejected by validateRangeKey (DurableStore legitimately
+// writes here through the ordinary Put path), but it must be excluded from AllKeys: a
+// caller deciding a split point (ShouldSplit, via MaybeSplitKey) needs the application
+// keyspace's own median, not one skewed -- or made outright invalid -- by transaction
+// bookkeeping keys, which sort well above ordinary lowercase application keys and can
+// easily fall outside whatever descriptor boundary the application data alone would
+// imply. Found as a real bug via TestConsensaBinaryExecutesALiveSplitAutomatically:
+// AllKeys previously filtered only "raft/", and ShouldSplit's returned median landed on a
+// "txn/record/..." key outside the parent descriptor's own interval, failing every
+// migration attempt with "kv: split key outside parent interior".
+var txnBookkeepingPrefix = []byte("txn/")
+
 const readIndexTimeout = 3 * time.Second
 
 // DurableRange is one range replica backed by a real Raft host over real TCP and a real
@@ -247,7 +263,7 @@ func (r *DurableRange) AllKeys() (map[string][]byte, error) {
 	out := map[string][]byte{}
 	for it.Next() {
 		key := it.Key()
-		if bytes.HasPrefix(key, reservedKeyPrefix) {
+		if bytes.HasPrefix(key, reservedKeyPrefix) || bytes.HasPrefix(key, txnBookkeepingPrefix) {
 			continue
 		}
 		out[string(key)] = append([]byte(nil), it.Value()...)

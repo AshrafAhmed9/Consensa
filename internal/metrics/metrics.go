@@ -9,6 +9,7 @@ type Registry struct {
 	RangeQPS         prometheus.Gauge
 	Recall           prometheus.Gauge
 	SplitRecommended *prometheus.GaugeVec
+	SplitExecuted    *prometheus.CounterVec
 }
 
 // NewRegistry creates an isolated registry, useful for both one node and deterministic tests.
@@ -24,6 +25,15 @@ func NewRegistry() *Registry {
 		Name: "consensa_kv_split_recommended",
 		Help: "1 if this range's key count currently exceeds the split threshold, 0 otherwise.",
 	}, []string{"range_id"})
-	r.MustRegister(term, qps, recall, splitRecommended)
-	return &Registry{Registry: r, RaftTerm: term, RangeQPS: qps, Recall: recall, SplitRecommended: splitRecommended}
+	// Incremented once, by whichever process's own local replica actually completes the
+	// migration (cmd/consensa's executeSplitIfRecommended), when a live split of
+	// parent_range_id into left_range_id/right_range_id finishes -- the execution signal
+	// consensa_kv_split_recommended above deliberately never claimed to be, since that
+	// gauge only ever reported the decision.
+	splitExecuted := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "consensa_kv_split_executed_total",
+		Help: "Incremented once a live split of parent_range_id into left_range_id/right_range_id has actually completed.",
+	}, []string{"parent_range_id", "left_range_id", "right_range_id"})
+	r.MustRegister(term, qps, recall, splitRecommended, splitExecuted)
+	return &Registry{Registry: r, RaftTerm: term, RangeQPS: qps, Recall: recall, SplitRecommended: splitRecommended, SplitExecuted: splitExecuted}
 }

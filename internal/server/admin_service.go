@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"sync"
 
 	consensav1 "github.com/ashraf/consensa/api/consensa/v1"
 	"github.com/ashraf/consensa/internal/raft"
@@ -34,7 +35,11 @@ type AdminService struct {
 	// map[uint64]txn.Participant-shaped assembly cmd/consensa already builds for
 	// NewKVService -- one more view onto the same DurableRange instances, not a second
 	// set of them.
-	ranges map[uint64]MembershipTarget
+	// rangesMu guards ranges, for the identical reason KVService.storesMu guards
+	// stores: kv.ExecuteLiveSplit can register a brand-new child range from a
+	// background goroutine while gRPC handler goroutines concurrently read the map.
+	rangesMu sync.RWMutex
+	ranges   map[uint64]MembershipTarget
 }
 
 // NewAdminService wires one MembershipTarget per range ID this process hosts. Unlike
@@ -42,7 +47,21 @@ type AdminService struct {
 // narrower MembershipTarget -- any *kv.DurableRange satisfies both, so a caller typically
 // passes the identical range instances to both constructors.
 func NewAdminService(ranges map[uint64]MembershipTarget) *AdminService {
-	return &AdminService{ranges: ranges}
+	copied := make(map[uint64]MembershipTarget, len(ranges))
+	for id, target := range ranges {
+		copied[id] = target
+	}
+	return &AdminService{ranges: copied}
+}
+
+// RegisterRange adds (or replaces) the membership target for rangeID -- the AdminService
+// counterpart to KVService.RegisterStore, called for the same reason: once a live split
+// creates a new child range, this service needs to know about it too, or a subsequent
+// AddReplica/PromoteReplica naming that range ID would fail with NotFound forever.
+func (s *AdminService) RegisterRange(rangeID uint64, target MembershipTarget) {
+	s.rangesMu.Lock()
+	defer s.rangesMu.Unlock()
+	s.ranges[rangeID] = target
 }
 
 // AddReplica registers a new node's ID and address on the named range's local Raft state
@@ -53,7 +72,9 @@ func NewAdminService(ranges map[uint64]MembershipTarget) *AdminService {
 // in internal/raft), so a caller must invoke this once per existing replica -- calling it
 // against only the leader would leave the followers unable to ever reach the new node.
 func (s *AdminService) AddReplica(_ context.Context, req *consensav1.AddReplicaRequest) (*consensav1.AddReplicaResponse, error) {
+	s.rangesMu.RLock()
 	target, ok := s.ranges[req.RangeId]
+	s.rangesMu.RUnlock()
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "no range %d on this node", req.RangeId)
 	}
@@ -76,7 +97,9 @@ func (s *AdminService) AddReplica(_ context.Context, req *consensav1.AddReplicaR
 // different node on a FailedPrecondition, the same contract TransactionalPut's routing
 // failures already establish for this codebase's other admin-adjacent RPC.
 func (s *AdminService) PromoteReplica(_ context.Context, req *consensav1.PromoteReplicaRequest) (*consensav1.PromoteReplicaResponse, error) {
+	s.rangesMu.RLock()
 	target, ok := s.ranges[req.RangeId]
+	s.rangesMu.RUnlock()
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "no range %d on this node", req.RangeId)
 	}

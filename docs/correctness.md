@@ -168,8 +168,19 @@ does *not* prove) lives — this section is a current index, not a replacement f
   and prove no record lost or duplicated and no cross-boundary leakage in either child.
   `ShouldSplit`/`DurableRange.MaybeSplitKey` close the split-*trigger decision* (a real
   size threshold picking the median key of the range's actual data,
-  `TestMaybeSplitKeyDrivesARealLiveSplit`) — not automatic execution or live traffic
-  cutover, which remain open. See `docs/notes/12-split-repair.md`.
+  `TestMaybeSplitKeyDrivesARealLiveSplit`). Automatic execution and live traffic cutover
+  are now closed for the KV plane: `kv.ExecuteLiveSplit` migrates data into two fresh
+  child ranges `cmd/consensa` stands up on its own already-shared transport, then
+  publishes new routing and registers the children with the running `KVService`/
+  `AdminService`, all triggered off real threshold-crossing writes inside the shipped
+  binary (`TestConsensaBinaryExecutesALiveSplitAutomatically`) — a new
+  `consensa_kv_split_executed_total` counter distinguishes real completion from the
+  decision-only gauge. The vector plane's own proof is not yet wired to the same
+  automatic trigger. Two real bugs were found and fixed while closing this: `AllKeys` was
+  filtering only Raft's reserved key prefix, not `internal/txn`'s equally-reserved one,
+  which could pick an invalid split key from transaction bookkeeping; a transient
+  migration failure was re-opening the same child ranges' storage on every retry,
+  corrupting it. See `docs/notes/12-split-repair.md`.
 - **Multi-range outbound connections are pooled.** Ranges on one node sharing a
   destination reuse one persistent TCP connection instead of dialing per message
   (`TestMultiplexedTransportPoolsOutboundConnections`). Making the receiving side read

@@ -98,6 +98,58 @@ plan's own account, the most expensive of the three named options: real producti
 would want incremental repair or a stale-parent-during-rebuild fallback to avoid the
 latency cliff this approach causes while every key or vector is re-inserted one at a time.
 
+**Update: automatic split EXECUTION is now real, for the KV plane.**
+`kv.ExecuteLiveSplit` (`internal/kv/execute_split.go`) factors the migration loop
+`TestLiveSplitPreservesKVCorrectness` proved by hand into a reusable function: given an
+already-running parent's applied data and two already-constructed child ranges, it
+migrates every key via a confirmed Put/Get, retrying past "not leader" since only
+whichever replica currently leads the new group can accept writes.
+`cmd/consensa.executeSplitIfRecommended` wires it into the running binary: it stands up
+two fresh child `kv.DurableRange` groups on the SAME process's already-shared
+`MultiplexedTransport` (needing no new listener or address at all -- registering a new
+range ID on an existing shared listener was already how the two original static ranges
+themselves start), migrates data, then calls `Meta.Replace` and registers the new
+children with the live `KVService`/`AdminService` so they are immediately reachable, not
+just replicated. No cross-process coordination call decides *when* to split: every
+process runs the identical check against identical Raft-replicated applied state, so all
+three independently compute the same decision, split key, and deterministic child IDs
+(`parentID*10+1`/`+2`) and each builds its own local replica of the same two groups --
+the same handshake-free bootstrap the two original static ranges already use.
+`TestConsensaBinaryExecutesALiveSplitAutomatically` proves it inside the real shipped
+binary: real `TransactionalPut` writes cross a low `--split-threshold`, a new
+`consensa_kv_split_executed_total` counter (not just the existing decision-only gauge)
+confirms migration actually completed, and new writes spanning both halves of the
+original keyspace keep succeeding afterward -- proving live traffic cutover, not just
+silent data migration into orphaned ranges nothing can route to.
+
+Two real bugs were found and fixed while wiring this, neither by inspection:
+`AllKeys` previously filtered only Raft's own `"raft/"` reserved prefix, not
+`internal/txn`'s equally-reserved `"txn/"` bookkeeping prefix (that package's own doc
+comment already claimed this convention, but `AllKeys` never actually honored it) --
+`ShouldSplit`'s median landed on a `txn/record/...` key outside the parent's own interval
+and every migration attempt failed with `"kv: split key outside parent interior"`.
+Separately, a transient migration failure was re-triggering `newChild` on the very same
+range IDs on every retry tick, opening a second `storage.Engine` against a directory the
+first attempt's `Host` was still actively using -- corrupting the WAL and crashing the
+whole process via `newKVRange`'s own `fatal()`. Both are fixed:
+`executeSplitIfRecommended` now caches the two child ranges across retries of the same
+parent, and `AllKeys` excludes both reserved prefixes.
+
+**What this still does not prove, stated plainly:** transaction bookkeeping keys
+(`txn/...`) are now deliberately excluded from migration, not moved with the data they
+describe -- acceptable because the parent range is kept around rather than deleted (so
+any in-flight transaction's own bookkeeping remains locally readable there), but a
+transaction that happens to still be in flight at the exact moment a split executes is an
+edge case this project has not modeled further. There is still no vector-plane execution
+wiring (the KV plane closes this gap; `internal/ann`'s own live-split proof
+(`TestLiveSplitPreservesSearchCorrectness`) is not yet triggered automatically by
+`cmd/consensa`). There is still no *in-flight request* cutover (an RPC already routed to
+the parent mid-split does not get redirected; a client must complete its current attempt,
+then re-route on its next one). No QPS-based trigger exists, only size. The "rebuild from
+scratch" strategy remains the most expensive of the three named options -- real
+production use would want incremental repair or a stale-parent-during-rebuild fallback to
+avoid the latency cliff every key pays while being re-inserted one at a time.
+
 ## What can fail?
 
 The metadata replacement must be a transaction in the real cluster. HNSW cross-boundary

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"sync"
 
 	consensav1 "github.com/ashraf/consensa/api/consensa/v1"
 	"github.com/ashraf/consensa/internal/kv"
@@ -30,7 +31,13 @@ type KVService struct {
 	consensav1.UnimplementedConsensaKVServer
 	router      *kv.Router
 	coordinator *txn.Coordinator
-	stores      map[uint64]txn.Participant
+	// storesMu guards stores: it used to be fixed for the process's whole lifetime, but
+	// kv.ExecuteLiveSplit now lets a background goroutine register a brand-new child
+	// range's store while gRPC handler goroutines concurrently read the map in
+	// TransactionalPut -- an unsynchronized map write racing a concurrent read is a real
+	// data race under Go's memory model, not just theoretical, once that's possible.
+	storesMu sync.RWMutex
+	stores   map[uint64]txn.Participant
 }
 
 // NewKVService wires a router (resolving keys to range descriptors) and one
@@ -41,7 +48,23 @@ type KVService struct {
 // knows how those groups were bootstrapped (addresses, storage directories, replica
 // sets) and this type has no business re-deriving that.
 func NewKVService(router *kv.Router, coordinator *txn.Coordinator, stores map[uint64]txn.Participant) *KVService {
-	return &KVService{router: router, coordinator: coordinator, stores: stores}
+	copied := make(map[uint64]txn.Participant, len(stores))
+	for id, store := range stores {
+		copied[id] = store
+	}
+	return &KVService{router: router, coordinator: coordinator, stores: copied}
+}
+
+// RegisterStore adds (or replaces) the participant for rangeID -- the piece a live split
+// needs once kv.ExecuteLiveSplit finishes migrating a range's data into two fresh
+// children and the caller (cmd/consensa) has called Router's underlying Meta.Replace to
+// make those children routable: without this, TransactionalPut would resolve a key to a
+// child range ID that Router now knows about but this service still has no participant
+// for, failing every write to it with "no participant configured" forever.
+func (s *KVService) RegisterStore(rangeID uint64, store txn.Participant) {
+	s.storesMu.Lock()
+	defer s.storesMu.Unlock()
+	s.stores[rangeID] = store
 }
 
 // TransactionalPut resolves every key in the request to its owning range via router,
@@ -71,13 +94,16 @@ func (s *KVService) TransactionalPut(_ context.Context, req *consensav1.Transact
 	}
 
 	writes := map[txn.Participant][]txn.Intent{}
+	s.storesMu.RLock()
 	for rangeID, intents := range byRange {
 		store, ok := s.stores[rangeID]
 		if !ok {
+			s.storesMu.RUnlock()
 			return nil, status.Errorf(codes.Internal, "no participant configured for range %d", rangeID)
 		}
 		writes[store] = intents
 	}
+	s.storesMu.RUnlock()
 
 	if err := s.coordinator.Commit(req.TxnId, writes); err != nil {
 		return nil, status.Errorf(codes.Aborted, "transaction %s: %v", req.TxnId, err)

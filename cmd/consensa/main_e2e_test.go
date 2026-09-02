@@ -65,12 +65,17 @@ type e2eNode struct {
 	dataDir    string
 	binary     string
 	peersFlag  string
-	cmd        *exec.Cmd
+	// extraArgs appends additional flags beyond start's own defaults -- e.g.
+	// --split-threshold/--split-check-interval for a test that needs a live split to
+	// actually trigger within a reasonable deadline, which the default --split-threshold
+	// (100000) never would.
+	extraArgs []string
+	cmd       *exec.Cmd
 }
 
 func (n *e2eNode) start(t *testing.T) {
 	t.Helper()
-	cmd := exec.Command(n.binary,
+	args := []string{
 		"-id", fmt.Sprint(n.id),
 		"-peers", n.peersFlag,
 		"-data-dir", n.dataDir,
@@ -78,7 +83,9 @@ func (n *e2eNode) start(t *testing.T) {
 		"-metrics-listen", n.metricAddr,
 		"-dimension", "4",
 		"-tick-interval", "20ms",
-	)
+	}
+	args = append(args, n.extraArgs...)
+	cmd := exec.Command(n.binary, args...)
 	cmd.Stdout = os.Stderr // surface node logs under `go test -v` for debugging failures
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
