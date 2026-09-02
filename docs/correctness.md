@@ -196,6 +196,20 @@ does *not* prove) lives — this section is a current index, not a replacement f
   pattern re-proposed an already-committed insert; and `TCPTransport.Send` had no write
   deadline, so a stalled peer could hold a host's mutex forever. See
   `docs/notes/12-split-repair.md`.
+- **The vector-plane split boundary's recall cost is now measured, not just named.**
+  `TestMeasureRecallAcrossRealisticIDSplit` (`internal/ann/split_recall_measurement_test.go`)
+  quantifies the gap `ann.ShouldSplit`'s own doc comment already flagged: with a dataset
+  where vector IDs are independent of cluster membership (the realistic case — real
+  primary keys are not correlated with embedding-space position), recall@10 drops from
+  0.998 pre-split to 0.622 post-split (37.7% relative) under today's ID-lexicographic
+  boundary and rebuild-from-scratch child construction. `docs/adr/011-vector-split-boundary.md`
+  records this measurement and the decision it confirms: rebuild-from-scratch stays the
+  correct interim strategy (it is the only one of PLAN.md's three options with an
+  already-solved Raft-replication story), while a clustering-aware boundary plus
+  replicated incremental repair remains real, unimplemented future work — the mechanism
+  for in-memory repair already exists (`HNSW.Repair`), but making its output replicate
+  deterministically across a live Raft group is a separate, correctness-critical design
+  problem this measurement does not attempt to solve.
 - **Multi-range outbound connections are pooled.** Ranges on one node sharing a
   destination reuse one persistent TCP connection instead of dialing per message
   (`TestMultiplexedTransportPoolsOutboundConnections`). Making the receiving side read
