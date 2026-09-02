@@ -83,17 +83,21 @@ expose exactly the two-step sequence above -- `AddReplica` calls `AddKnownPeer`/
 `PromoteReplica` calls `ProposeConfChange` (only succeeds against the current leader,
 the same "route to whoever's in charge" contract `ConsensaKV.TransactionalPut` already
 established). Gated by `internal/auth`'s optional shared-secret bearer-token interceptor
-like every other RPC in this codebase (off by default; see `docs/notes/13-auth.md`), not
-exempt from it. `TestAdminServiceAddsAndPromotesReplicaOverGRPC` proves the full
-sequence entirely over real gRPC (not direct Go calls): a genuinely new 4th
-`kv.DurableRange`, unknown to any of the original three until `AddReplica` runs, joins as
-a learner, catches up over real replication, and is promoted to a full voter.
+like every other RPC in this codebase (off by default; see `docs/notes/13-auth.md`), and
+unlike the data-plane RPCs, this service can require its OWN separate token
+(`--admin-auth-token`) -- a credential valid for ordinary `Upsert`/`Search`/
+`TransactionalPut` traffic is not automatically valid here, proven end to end against the
+real binary by `TestConsensaBinaryScopesAdminTokenIndependently`.
+`TestAdminServiceAddsAndPromotesReplicaOverGRPC` proves the full membership sequence
+entirely over real gRPC (not direct Go calls): a genuinely new 4th `kv.DurableRange`,
+unknown to any of the original three until `AddReplica` runs, joins as a learner, catches
+up over real replication, and is promoted to a full voter.
 
-**What this still does not do, stated plainly:** a valid auth token authorizes every RPC
-equally -- there is no scoping that would let a token call ordinary data-plane RPCs but
-not this membership-changing one. Bootstrap (how a fresh process learns which group to
-even try joining, i.e. discovering `AddReplica`'s own address to call it) and
-range-routing updates after a membership change remain separate, undone work.
+**What this still does not do, stated plainly:** any valid admin token authorizes both
+`AddReplica` and `PromoteReplica` equally -- there is no finer-grained, per-method scoping
+within this one service. Bootstrap (how a fresh process learns which group to even try
+joining, i.e. discovering `AddReplica`'s own address to call it) and range-routing
+updates after a membership change remain separate, undone work.
 
 A real bug was found and fixed while proving this, caught by real CI (not local, not by
 inspection): `AddKnownPeer` originally only appended to `n.peers`, but a currently-leading

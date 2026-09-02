@@ -12,16 +12,22 @@ that is still a genuine access control, not a full identity system.
 
 ## How does it work?
 
-`internal/auth.TokenAuth` wraps one operator-configured shared secret (`--auth-token`,
-empty by default). It installs as a `grpc.UnaryServerInterceptor`/`StreamServerInterceptor`
-pair on the single `grpc.Server` `cmd/consensa/main.go` already builds -- one interceptor
-pair covers all three registered services, since they share one listener and one process.
-Every RPC's incoming metadata is checked for an `authorization: Bearer <token>` value,
-compared against the configured secret with `crypto/subtle.ConstantTimeCompare` rather
-than `==`, closing the standard timing side channel a naive string comparison leaks (a
-network attacker who can measure response latency precisely enough can otherwise recover
-a secret one byte at a time by watching which candidate byte takes marginally longer to
-mismatch).
+`internal/auth.TokenAuth` wraps up to two operator-configured shared secrets: a
+data-plane token (`--auth-token`, gating `Consensa` and `ConsensaKV`) and an admin token
+(`--admin-auth-token`, gating `ConsensaAdmin`). It installs as a
+`grpc.UnaryServerInterceptor`/`StreamServerInterceptor` pair on the single `grpc.Server`
+`cmd/consensa/main.go` already builds -- one interceptor pair covers all three registered
+services, since they share one listener and one process, deciding which token a call
+needs purely from `grpc.UnaryServerInfo`/`StreamServerInfo`'s own `FullMethod` (e.g.
+`/consensa.v1.ConsensaAdmin/AddReplica`), with no per-service wiring needed anywhere else.
+If `--admin-auth-token` is left unset it falls back to `--auth-token`, so a deployment
+that only ever wanted one secret protecting everything (this package's original shape)
+still gets that with a single flag. Every RPC's incoming metadata is checked for an
+`authorization: Bearer <token>` value, compared against the required secret with
+`crypto/subtle.ConstantTimeCompare` rather than `==`, closing the standard timing side
+channel a naive string comparison leaks (a network attacker who can measure response
+latency precisely enough can otherwise recover a secret one byte at a time by watching
+which candidate byte takes marginally longer to mismatch).
 
 The client side, `internal/auth.BearerCredentials`, implements
 `credentials.PerRPCCredentials` so a caller attaches its token once at dial time
@@ -53,11 +59,15 @@ ever grows to need one.
 
 ## What tradeoff was made?
 
-One secret authorizes every RPC in every service equally. There is no scoping that lets a
-token call ordinary data-plane RPCs (`Upsert`, `Search`) but not `ConsensaAdmin`'s
-membership-changing ones -- a real production deployment separating an application's data
-plane from its own cluster-operator surface would want per-service or per-method tokens,
-which this does not attempt. `RequireTransportSecurity` deliberately returns `false`: this
+Scoping stops at the service boundary, not the method. `--admin-auth-token`, separate
+from `--auth-token`, means a data-plane credential cannot call `ConsensaAdmin`'s
+membership-changing RPCs -- but within `ConsensaAdmin`, one valid admin token authorizes
+both `AddReplica` and `PromoteReplica` equally; within the data plane, one valid token
+authorizes `Upsert`, `Search`, `Delete`, `BatchGet`, `Status`, and `TransactionalPut`
+equally. A real production deployment wanting per-method permissions, or per-user
+identity distinguishing WHO called something (not just whether the call was authorized
+at all), would need a real identity system this package deliberately is not.
+`RequireTransportSecurity` deliberately returns `false`: this
 project's entire deployment story (docker-compose, the e2e tests, the demo script) runs
 over plaintext TCP, so requiring TLS here would make the credential simply unusable rather
 than more secure. The tradeoff is stated in the package doc comment itself, not hidden:

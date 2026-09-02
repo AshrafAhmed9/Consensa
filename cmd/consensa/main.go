@@ -373,7 +373,8 @@ func main() {
 	splitThreshold := flag.Int("split-threshold", 100000, "key count above which a KV range is reported as recommending a split (consensa_kv_split_recommended)")
 	leaseDuration := flag.Duration("lease-duration", 6*time.Second, "how long an automatically granted follower-read lease is valid for once committed")
 	leaseRenewBefore := flag.Duration("lease-renew-before", 3*time.Second, "renew a range's lease once less than this much validity remains, so a valid lease exists continuously rather than lapsing between grants")
-	authToken := flag.String("auth-token", "", "shared-secret bearer token every gRPC call must present (internal/auth); empty disables auth entirely, matching this project's previous unauthenticated behavior")
+	authToken := flag.String("auth-token", "", "shared-secret bearer token Consensa/ConsensaKV calls must present (internal/auth); empty disables data-plane auth, matching this project's previous unauthenticated behavior")
+	adminAuthToken := flag.String("admin-auth-token", "", "shared-secret bearer token ConsensaAdmin calls must present; empty falls back to --auth-token (internal/auth.NewTokenAuth's own doc comment explains why), so this only needs setting when admin access should be gated separately from the data plane")
 	flag.Parse()
 
 	if *id == 0 {
@@ -725,7 +726,7 @@ func main() {
 	// see internal/auth's own package doc for why a shared-secret bearer token, off by
 	// default, is this project's answer to the "deliberately unauthenticated" gap named in
 	// api/consensa/v1/consensa.proto and docs/adr/010-learners.md.
-	tokenAuth := auth.NewTokenAuth(*authToken)
+	tokenAuth := auth.NewTokenAuth(*authToken, *adminAuthToken)
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(tokenAuth.UnaryInterceptor),
 		grpc.ChainStreamInterceptor(tokenAuth.StreamInterceptor),

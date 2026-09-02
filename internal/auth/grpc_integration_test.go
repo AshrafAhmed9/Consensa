@@ -59,7 +59,7 @@ func dialWithAuth(t *testing.T, tokenAuth *TokenAuth, dialOpts ...grpc.DialOptio
 // token_test.go's authorize-only tests cannot exercise, since they never construct a real
 // grpc.Server or send a real request over the wire.
 func TestUnaryInterceptorRejectsMissingToken(t *testing.T) {
-	client, closeAll := dialWithAuth(t, NewTokenAuth("s3cret"))
+	client, closeAll := dialWithAuth(t, NewTokenAuth("s3cret", ""))
 	defer closeAll()
 
 	_, err := client.Check(context.Background(), &grpc_health_v1.HealthCheckRequest{})
@@ -75,7 +75,7 @@ func TestUnaryInterceptorRejectsMissingToken(t *testing.T) {
 // helper and the server-side TokenAuth interceptor actually interoperate over a real
 // connection, end to end.
 func TestUnaryInterceptorAcceptsBearerCredentials(t *testing.T) {
-	client, closeAll := dialWithAuth(t, NewTokenAuth("s3cret"), grpc.WithPerRPCCredentials(NewBearerCredentials("s3cret")))
+	client, closeAll := dialWithAuth(t, NewTokenAuth("s3cret", ""), grpc.WithPerRPCCredentials(NewBearerCredentials("s3cret")))
 	defer closeAll()
 
 	resp, err := client.Check(context.Background(), &grpc_health_v1.HealthCheckRequest{})
@@ -91,7 +91,7 @@ func TestUnaryInterceptorAcceptsBearerCredentials(t *testing.T) {
 // token is rejected exactly like one presenting none at all -- Enabled auth does not
 // silently accept an arbitrary credential merely because one was attached.
 func TestUnaryInterceptorRejectsWrongBearerCredentials(t *testing.T) {
-	client, closeAll := dialWithAuth(t, NewTokenAuth("s3cret"), grpc.WithPerRPCCredentials(NewBearerCredentials("wrong")))
+	client, closeAll := dialWithAuth(t, NewTokenAuth("s3cret", ""), grpc.WithPerRPCCredentials(NewBearerCredentials("wrong")))
 	defer closeAll()
 
 	_, err := client.Check(context.Background(), &grpc_health_v1.HealthCheckRequest{})
@@ -104,7 +104,7 @@ func TestUnaryInterceptorRejectsWrongBearerCredentials(t *testing.T) {
 // configuration (empty token) never rejects a real call -- the deployment-compatibility
 // guarantee NewTokenAuth's own doc comment states.
 func TestUnaryInterceptorDisabledAllowsUnauthenticatedCall(t *testing.T) {
-	client, closeAll := dialWithAuth(t, NewTokenAuth(""))
+	client, closeAll := dialWithAuth(t, NewTokenAuth("", ""))
 	defer closeAll()
 
 	if _, err := client.Check(context.Background(), &grpc_health_v1.HealthCheckRequest{}); err != nil {

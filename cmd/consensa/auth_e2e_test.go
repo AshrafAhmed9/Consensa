@@ -95,6 +95,79 @@ func TestConsensaBinaryEnforcesAuthTokenWhenConfigured(t *testing.T) {
 	})
 }
 
+// TestConsensaBinaryScopesAdminTokenIndependently proves --admin-auth-token, configured
+// separately from --auth-token, actually separates ConsensaAdmin's credential from the
+// data plane's inside the real shipped binary: a client holding only the data-plane token
+// can call Status but is rejected calling AddReplica, and vice versa for the admin token
+// -- the real security property this scoping exists for (a leaked data-plane credential
+// cannot be used to drive membership changes).
+func TestConsensaBinaryScopesAdminTokenIndependently(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs a real OS process; skipped in -short mode")
+	}
+
+	binDir := t.TempDir()
+	binary := binPath(t, binDir)
+
+	raftAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	node := &e2eNode{
+		id: 1, raftAddr: raftAddr,
+		grpcAddr:   fmt.Sprintf("127.0.0.1:%d", freePort(t)),
+		metricAddr: fmt.Sprintf("127.0.0.1:%d", freePort(t)),
+		dataDir:    t.TempDir(),
+		binary:     binary,
+		peersFlag:  fmt.Sprintf("1=%s", raftAddr),
+		extraArgs:  []string{"-auth-token", "data-secret", "-admin-auth-token", "admin-secret"},
+	}
+	node.start(t)
+	defer node.kill(t)
+	waitForListening(t, node.grpcAddr, 10*time.Second)
+
+	dialWith := func(t *testing.T, token string) *grpc.ClientConn {
+		t.Helper()
+		conn, err := grpc.NewClient(node.grpcAddr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithPerRPCCredentials(auth.NewBearerCredentials(token)),
+		)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		return conn
+	}
+	addReplica := func(ctx context.Context, conn *grpc.ClientConn) error {
+		_, err := consensav1.NewConsensaAdminClient(conn).AddReplica(ctx, &consensav1.AddReplicaRequest{RangeId: 1, NodeId: 99, Address: "127.0.0.1:1"})
+		return err
+	}
+
+	t.Run("data token calls Status but not AddReplica", func(t *testing.T) {
+		conn := dialWith(t, "data-secret")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := consensav1.NewConsensaClient(conn).Status(ctx, &consensav1.StatusRequest{}); err != nil {
+			t.Fatalf("Status with data token: %v", err)
+		}
+		if err := addReplica(ctx, conn); status.Code(err) != codes.Unauthenticated {
+			t.Fatalf("AddReplica with data token: code = %v, want Unauthenticated (err: %v)", status.Code(err), err)
+		}
+	})
+
+	t.Run("admin token calls AddReplica but not Status", func(t *testing.T) {
+		conn := dialWith(t, "admin-secret")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// AddReplica may still fail for an ordinary business reason (a bogus range ID
+		// here) -- the point is it must NOT fail with Unauthenticated, proving the admin
+		// token really was accepted by the auth layer before reaching the handler.
+		if err := addReplica(ctx, conn); status.Code(err) == codes.Unauthenticated {
+			t.Fatalf("AddReplica with admin token was rejected as Unauthenticated: %v", err)
+		}
+		if _, err := consensav1.NewConsensaClient(conn).Status(ctx, &consensav1.StatusRequest{}); status.Code(err) != codes.Unauthenticated {
+			t.Fatalf("Status with admin token: code = %v, want Unauthenticated (err: %v)", status.Code(err), err)
+		}
+	})
+}
+
 // TestConsensaBinaryWithoutAuthTokenAllowsUnauthenticatedCalls proves the default,
 // backward-compatible behavior still holds inside the real binary: a node started WITHOUT
 // --auth-token accepts calls carrying no credentials at all, exactly as every existing

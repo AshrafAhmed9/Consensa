@@ -221,10 +221,13 @@ does *not* prove) lives — this section is a current index, not a replacement f
   `PromoteReplica` (`internal/server/admin_service.go`) expose the identical sequence,
   proven end to end by `TestAdminServiceAddsAndPromotesReplicaOverGRPC` -- gated, like
   every other RPC in this codebase, by `internal/auth`'s optional shared-secret
-  bearer-token interceptor (off by default; see `docs/notes/13-auth.md`). Still unbuilt:
-  per-RPC or per-service auth scoping (a valid token authorizes everything equally),
-  bootstrap discovery of which address to call, and updating client routing after a
-  membership change. See `docs/adr/010-learners.md`.
+  bearer-token interceptor (off by default; see `docs/notes/13-auth.md`), and unlike the
+  data-plane RPCs, independently scoped: `--admin-auth-token` requires a separate
+  credential from `--auth-token`, so a leaked data-plane token cannot drive membership
+  changes (`TestConsensaBinaryScopesAdminTokenIndependently`). Still unbuilt: per-method
+  scoping within one service (a valid admin token authorizes both `AddReplica` and
+  `PromoteReplica` equally), bootstrap discovery of which address to call, and updating
+  client routing after a membership change. See `docs/adr/010-learners.md`.
   A real performance regression was found and fixed while closing this: recomputing
   membership from the full log on every heartbeat and every proposed write (not just
   actual config changes) was cheap in unit tests but measurably destabilized leadership
@@ -271,9 +274,13 @@ does *not* prove) lives — this section is a current index, not a replacement f
   binary (`TestConsensaBinaryEnforcesAuthTokenWhenConfigured`). It is off by default (an
   empty `--auth-token`), so every existing deployment, test, and demo client that never
   learned about auth keeps working unmodified
-  (`TestConsensaBinaryWithoutAuthTokenAllowsUnauthenticatedCalls`). The secret comparison
-  uses `crypto/subtle.ConstantTimeCompare` to avoid a timing side channel. Stated plainly,
-  not left implied: this is a single shared secret authorizing every RPC equally, with no
-  per-user identity, no scoping, no rotation, and no transport encryption of its own — a
-  real deployment needs TLS in front of it before the token stops traveling in cleartext.
-  See `docs/notes/13-auth.md`.
+  (`TestConsensaBinaryWithoutAuthTokenAllowsUnauthenticatedCalls`). `ConsensaAdmin` can
+  require an independent secret (`--admin-auth-token`), so a data-plane credential does
+  not also authorize membership-change RPCs
+  (`TestAdminTokenScopedIndependently`, `TestConsensaBinaryScopesAdminTokenIndependently`).
+  The secret comparison uses `crypto/subtle.ConstantTimeCompare` to avoid a timing side
+  channel. Stated plainly, not left implied: within each of the two scopes, one shared
+  secret authorizes every RPC equally — there is no per-user identity, no per-method
+  scoping, no rotation, and no transport encryption of its own — a real deployment needs
+  TLS in front of it before either token stops traveling in cleartext. See
+  `docs/notes/13-auth.md`.

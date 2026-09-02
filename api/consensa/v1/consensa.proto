@@ -43,11 +43,12 @@ message TransactionalPutResponse {}
 // DurableRange.ProposeConfChange), proven in internal/raft/new_node_join_test.go against
 // real processes but until this service nothing reachable over the network could ever
 // drive them. Like every other RPC in this codebase, this is gated by internal/auth's
-// optional shared-secret bearer-token interceptor (--auth-token in cmd/consensa/main.go),
-// off by default -- a valid token authorizes every RPC in every service on this shared
-// grpc.Server equally, including this one; there is no per-service or per-method scoping,
-// stated plainly since a valid client credential is not restricted from calling
-// membership-change RPCs specifically. A real deployment should also put this behind TLS
+// optional shared-secret bearer-token interceptor -- but unlike Consensa/ConsensaKV, this
+// service can be gated by a SEPARATE secret (--admin-auth-token in cmd/consensa/main.go,
+// falling back to --auth-token if unset), so a credential valid for ordinary data-plane
+// traffic is not automatically valid for membership-change RPCs. There is still no
+// per-method scoping WITHIN this service (any valid admin token can call both AddReplica
+// and PromoteReplica). A real deployment should also put this behind TLS
 // (internal/auth's own doc comment states why the token layer alone does not protect
 // against network eavesdropping) before exposing it publicly.
 service ConsensaAdmin {

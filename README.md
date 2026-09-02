@@ -139,10 +139,11 @@ a client re-routes on its next call), and no QPS-based trigger exists, only size
 process too, reachable over a real `ConsensaAdmin.AddReplica`/`PromoteReplica` gRPC
 surface -- `cmd/consensa` now exposes it, not just `internal/raft`'s own primitives, and
 every RPC across all three services is now gated by an optional shared-secret bearer-token
-layer (`--auth-token`, off by default; see `docs/notes/13-auth.md` and
-`internal/auth`) -- one secret authorizes everything equally, with no per-user identity,
-scoping, or transport encryption of its own, stated plainly rather than left implied.
-Snapshot isolation now supports
+layer (`--auth-token`, off by default; see `docs/notes/13-auth.md` and `internal/auth`),
+with `ConsensaAdmin` independently scopable via `--admin-auth-token` so a leaked
+data-plane credential can't drive membership changes -- within each scope, no per-user
+identity, no rotation, or transport encryption of its own, stated plainly rather than
+left implied. Snapshot isolation now supports
 read-refresh (a pushed transaction re-validates its own prior reads instead of aborting
 outright), proven for both the in-memory `Store` and the real, Raft-replicated
 `DurableStore`; a running binary now advances the closed timestamp and automatically
