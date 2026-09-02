@@ -126,8 +126,9 @@ including the ones later sessions overturned.
 
 Stated plainly rather than left implied: no automatic trigger fires a range split on its
 own (the decision logic is proven, nothing calls it on a timer); routing metadata can now
-cut over live, but no in-flight request mid-split gets redirected, and `cmd/consensa`'s
-real deployment doesn't assemble a `Router` at all yet; joint consensus can reconfigure replicas already known to a group, but there's
+cut over live and `cmd/consensa` already assembles a real `Router` for its two static
+ranges, but nothing in the running binary ever triggers a real split against it, and no
+in-flight request mid-split gets redirected; joint consensus can reconfigure replicas already known to a group, but there's
 no workflow yet for provisioning a brand-new process and publishing its address; snapshot
 isolation is upgraded to reject write skew but isn't full serializability; a running
 binary now advances the closed timestamp on a real interval, but nothing yet grants a

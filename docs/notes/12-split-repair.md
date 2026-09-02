@@ -70,12 +70,13 @@ correctly reroutes to the child once it refreshes.
 
 **What this still does not prove, stated plainly:** nothing calls `MaybeSplitKey` on a
 timer or QPS counter -- there is no automatic *execution* on either plane, and no
-QPS-based trigger exists at all (size only). The metadata cutover above is proven at the
-`Meta`/`Router` layer, which the in-memory `MultiRaft`/`RoutedKV` client path already
-used; `cmd/consensa`'s real deployment does not yet assemble a `Router` at all (it wires
-`KVService` directly to two static `DurableStore`s -- see `docs/notes/08-transactions.md`),
-so this is proven as a reusable capability, not yet as something the running binary does
-during a real split. There is still no *in-flight request* cutover (an RPC already routed
+QPS-based trigger exists at all (size only). `cmd/consensa` does already assemble a real
+`kv.Meta`/`kv.Router` for its two static ranges and passes it to `KVService`
+(`main.go`) -- corrected here after an earlier version of this note claimed otherwise --
+but nothing in the running binary ever calls `Meta.Replace` on it: the `Router` this test
+proves cutover through and the one the real binary constructs are the same type, exercised
+the same way, but nothing yet triggers a real split against a live deployment to exercise
+that path end to end. There is still no *in-flight request* cutover (an RPC already routed
 to the parent mid-split does not get redirected; a client must complete its current
 attempt, then re-route on its next one) -- this project has never modeled that finer-grained
 case. The keyspace descriptor split, the data split, and the metadata publish are each
