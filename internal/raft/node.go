@@ -145,11 +145,18 @@ func (n *node) proposeInternal(data []byte) error {
 	if err := n.log.append([]Entry{e}); err != nil {
 		return err
 	}
-	// Effective immediately, before this entry is even sent to anyone else, let alone
-	// committed -- see confChangeEntry's doc comment for why "on append" is the rule.
-	// For an ordinary (non-config) entry this is a no-op: recomputeMembership only
-	// changes anything when the newly appended entry actually decodes as one.
-	n.recomputeMembership()
+	// Only a config-change entry can possibly change membership, and a leader's own
+	// append (always at lastIndex()+1) never truncates anything the way a follower's
+	// conflict-resolving append can -- so checking just this one entry, rather than
+	// rescanning the whole log, is both sufficient and correct here, not merely an
+	// optimization applied where it happens to be safe. "On append, not on commit" (see
+	// confChangeEntry's doc comment) is preserved: this still runs before the entry is
+	// sent to anyone else. Rescanning the full log on every single Propose call --
+	// including every ordinary application write, the actual hot path under load -- was
+	// the real cost the CI regression this comment replaces came from.
+	if _, ok := decodeConfChange(data); ok {
+		n.recomputeMembership()
+	}
 	n.unstable = append(n.unstable, e)
 	n.match[n.id] = n.log.lastIndex()
 	n.broadcastAppend()
@@ -258,13 +265,16 @@ func (n *node) handleAppend(m Message) {
 	if err := n.log.append(m.Entries); err != nil {
 		return
 	}
-	// Recomputed unconditionally, even when m.Entries is empty (a bare heartbeat): a
-	// PRIOR append could have truncated entries this node had already applied to its
-	// membership (a real leader-change conflict-resolution case, not just a growth
-	// case), so membership must always reflect whatever the log currently holds, not
-	// just what changed in this specific call.
-	n.recomputeMembership()
 	if len(m.Entries) > 0 {
+		// raftLog.append only ever truncates or extends the log as a direct result of
+		// appending a non-empty entry batch (see log.go) -- a bare heartbeat (empty
+		// Entries) changes nothing about what's in the log, so it cannot possibly change
+		// what recomputeMembership would find, and calling it on every single heartbeat
+		// tick regardless is a real O(log length) cost paid for nothing. Found as an
+		// actual CI failure under sustained load (a long-running e2e test's leadership
+		// went unstable, "proposal to non-leader"), not by inspection -- this call used
+		// to run unconditionally here.
+		n.recomputeMembership()
 		n.unstable = append(n.unstable, cloneEntries(m.Entries)...)
 	}
 	if m.Commit > n.log.committed {
