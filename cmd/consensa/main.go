@@ -204,6 +204,7 @@ func checkSplitRecommendations(sizeThreshold int, qpsThreshold float64, qps map[
 type executeSplitTarget interface {
 	splitCheckRange
 	AllKeys() (map[string][]byte, error)
+	MarkRetired()
 }
 
 // executeSplitIfRecommended closes the gap checkSplitRecommendations' own doc comment
@@ -294,6 +295,18 @@ func executeSplitIfRecommended(
 		return
 	}
 
+	// Retire the parent BEFORE publishing new routing, not after: a write already inside
+	// parent.Put (resolved to this range's object before this point) or one that arrives
+	// in the brief window before Replace below takes effect now gets ErrRangeKeyMismatch
+	// instead of silently succeeding against a range that data has already moved out of --
+	// closing the gap docs/notes/12-split-repair.md and the README used to name plainly:
+	// the parent was "deliberately left in place rather than deleted" and kept accepting
+	// writes for its now-foreign key range indefinitely. See DurableRange.MarkRetired's own
+	// doc comment. A caller that hits this error retries through the same
+	// ErrRangeKeyMismatch-triggers-a-metadata-refresh contract RoutedKV already relies on
+	// elsewhere, and by the time it does, Replace below has already run.
+	parent.MarkRetired()
+
 	next := meta.All()
 	filtered := next[:0]
 	for _, d := range next {
@@ -326,6 +339,7 @@ type annExecuteSplitTarget interface {
 	MaybeSplitKey(sizeThreshold int, qps, qpsThreshold float64) (string, bool, error)
 	AllVectors() map[string]vector.Vector
 	Snapshot() ([]byte, error)
+	MarkRetired()
 }
 
 // executeAnnSplitIfRecommended is executeSplitIfRecommended's vector-plane counterpart --
@@ -390,6 +404,10 @@ func executeAnnSplitIfRecommended(
 		slog.Error("live split: migration failed, will retry against the same child ranges next tick", "plane", "vector", "range_id", parentID, "error", err)
 		return
 	}
+
+	// See executeSplitIfRecommended's identical call for why this happens before Replace,
+	// not after: docs/adr/013-parent-range-retirement.md.
+	parent.MarkRetired()
 
 	next := meta.All()
 	filtered := next[:0]

@@ -42,6 +42,42 @@ func TestDurableRangeRejectsReservedKeyPrefix(t *testing.T) {
 	}
 }
 
+// TestDurableRangeRejectsAllOperationsOnceRetired proves the zombie-parent bug is actually
+// fixed: before MarkRetired existed, a range left running after a live split kept accepting
+// Put/Delete/Get forever, silently diverging from data the rest of the system now considers
+// owned by a child range (see the retired field's own doc comment in durable_range.go). A
+// single never-ticked replica is enough here -- retired is checked before Put/Delete ever
+// reach Propose, so this needs no leader election, group, or peer traffic to prove.
+func TestDurableRangeRejectsAllOperationsOnceRetired(t *testing.T) {
+	addr := freeKVAddr(t)
+	r, err := NewDurableRange(DurableRangeConfig{
+		ID: 1, GroupPeers: []raft.NodeID{1}, ListenAddress: addr, TransportPeers: map[raft.NodeID]string{}, StorageDir: t.TempDir(),
+		ElectionTick: 60, HeartbeatTick: 6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	if r.Retired() {
+		t.Fatal("freshly constructed range reports Retired() = true")
+	}
+	r.MarkRetired()
+	if !r.Retired() {
+		t.Fatal("Retired() = false after MarkRetired")
+	}
+
+	if err := r.Put([]byte("k"), []byte("v")); !errors.Is(err, ErrRangeKeyMismatch) {
+		t.Errorf("Put on retired range = %v, want ErrRangeKeyMismatch", err)
+	}
+	if err := r.Delete([]byte("k")); !errors.Is(err, ErrRangeKeyMismatch) {
+		t.Errorf("Delete on retired range = %v, want ErrRangeKeyMismatch", err)
+	}
+	if _, err := r.Get([]byte("k")); !errors.Is(err, ErrRangeKeyMismatch) {
+		t.Errorf("Get on retired range = %v, want ErrRangeKeyMismatch", err)
+	}
+}
+
 // This file is DurableRange's counterpart to internal/ann/durable_test.go: it proves a
 // killed-and-restarted range replica recovers its key/value data, and specifically proves
 // it via storage.Engine's own WAL/SSTable recovery -- not via replaying the Raft log

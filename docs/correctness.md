@@ -220,6 +220,26 @@ does *not* prove) lives — this section is a current index, not a replacement f
   0.592, within 5% of rebuild's recall while replicating in `O(1)` Raft entries instead of
   `O(n)`. The split *boundary* itself (ID-lexicographic, not clustering-aware) is
   unchanged and remains the real, still-open gap ADR-011 identified.
+- **The retired parent range now refuses stale reads and writes instead of silently
+  serving them.** `docs/notes/12-split-repair.md` had named this as a stated
+  simplification: the parent range is deliberately kept running after a live split
+  (not deleted) rather than serving no purpose, but nothing stopped it from continuing
+  to accept `Put`/`Get`/`Delete` (KV) or `Insert`/`Search`/`GetVector` (vector) against
+  data that had already migrated to its children -- a request racing the split, or one
+  arriving in the routing-update window, would succeed against the parent and silently
+  diverge from the children's state. `DurableRange` and `DurableNode` each gained a
+  `retired atomic.Bool` (`MarkRetired`/`Retired`); every mutating and reading method now
+  checks it first and returns `ErrRangeKeyMismatch` once set, the same sentinel
+  `RoutedKV` already treats as "refresh metadata and retry" elsewhere in this codebase.
+  `executeSplitIfRecommended`/`executeAnnSplitIfRecommended` call `MarkRetired()`
+  immediately after migration succeeds and *before* `meta.Replace` publishes the new
+  routing, so the parent stops accepting requests before any client could be told to
+  stop sending them to it. This turns a silent-divergence bug into a self-defending
+  failure mode: a client with a write already in flight gets rejected and retries
+  through the existing stale-route contract instead of corrupting state. It does not
+  claim a zero-window guarantee between different processes' independently-updated
+  local views of routing -- only that the parent itself can no longer be the source of
+  silent divergence. See `docs/adr/013-parent-range-retirement.md`.
 - **Multi-range outbound connections are pooled.** Ranges on one node sharing a
   destination reuse one persistent TCP connection instead of dialing per message
   (`TestMultiplexedTransportPoolsOutboundConnections`). Making the receiving side read

@@ -137,9 +137,16 @@ then backfill replacement neighbors so pruned nodes aren't left under-connected)
 of a from-scratch rebuild -- measured at recall parity with rebuild (within 5% relative)
 while replicating in one Raft entry per child instead of one per vector
 (`docs/adr/012-replicated-incremental-repair.md`). The boundary choice itself is
-unchanged and remains real, unimplemented future work. There is still no
-in-flight request cutover (an RPC already routed to the parent mid-split completes there;
-a client re-routes on its next call). The split trigger is no longer size-only: both
+unchanged and remains real, unimplemented future work. The parent range no longer
+silently keeps serving stale reads and writes after a split: `MarkRetired()` flips it
+into a rejecting state (`kv.ErrRangeKeyMismatch`/`ann.ErrRangeKeyMismatch` on every
+Put/Get/Delete or Insert/Search/GetVector) before `meta.Replace` publishes the new
+routing, so a request already in flight against the parent, or one that lands in the
+brief window before routing updates, fails and retries through the same
+stale-route-refresh contract `RoutedKV` already relies on elsewhere -- instead of
+succeeding against data that has already moved. This closes the silent-divergence risk;
+it does not claim a zero-window guarantee across independent processes' local views. The
+split trigger is no longer size-only: both
 planes now also support a QPS threshold (`--split-qps-threshold`, off by default), so a
 range that is small by key/vector count but genuinely hot under a skewed access pattern
 can still recommend a split -- `kv.ShouldSplit`/`ann.ShouldSplit` fire on either active

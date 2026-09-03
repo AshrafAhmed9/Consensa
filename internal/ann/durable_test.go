@@ -85,6 +85,47 @@ func waitForApplied(t *testing.T, n *DurableNode, want int, deadline time.Durati
 	t.Fatalf("replica applied %d mutations, want at least %d within %s", n.AppliedCount(), want, deadline)
 }
 
+// TestDurableNodeRejectsAllOperationsOnceRetired is DurableNode's counterpart to
+// internal/kv's TestDurableRangeRejectsAllOperationsOnceRetired: it proves the zombie-parent
+// bug is fixed on the vector plane too. Before MarkRetired existed, a range left running
+// after a live split kept serving Insert/Delete/Search/GetVector forever for vectors the
+// rest of the system now considers owned by a child range. retired is checked before
+// Insert/Delete ever reach Propose, so a single never-ticked replica proves this with no
+// election, group, or peer traffic needed.
+func TestDurableNodeRejectsAllOperationsOnceRetired(t *testing.T) {
+	n, err := NewDurableNode(DurableNodeConfig{
+		ID: 1, GroupPeers: []raft.NodeID{1}, ListenAddress: freeAddr(t), TransportPeers: map[raft.NodeID]string{},
+		StorageDir: t.TempDir(), Index: durableTestConfig(),
+		ElectionTick: 60, HeartbeatTick: 6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n.Close()
+
+	if n.Retired() {
+		t.Fatal("freshly constructed node reports Retired() = true")
+	}
+	n.MarkRetired()
+	if !n.Retired() {
+		t.Fatal("Retired() = false after MarkRetired")
+	}
+
+	v := vector.Vector{1, 0, 0, 0}
+	if err := n.Insert("a", v); !errors.Is(err, ErrRangeKeyMismatch) {
+		t.Errorf("Insert on retired node = %v, want ErrRangeKeyMismatch", err)
+	}
+	if err := n.Delete("a"); !errors.Is(err, ErrRangeKeyMismatch) {
+		t.Errorf("Delete on retired node = %v, want ErrRangeKeyMismatch", err)
+	}
+	if _, err := n.Search(v, 1, 10); !errors.Is(err, ErrRangeKeyMismatch) {
+		t.Errorf("Search on retired node = %v, want ErrRangeKeyMismatch", err)
+	}
+	if got, ok := n.GetVector("a"); ok || got != nil {
+		t.Errorf("GetVector on retired node = (%v, %v), want (nil, false)", got, ok)
+	}
+}
+
 // TestDurableNodeSurvivesRestart is the headline scenario: three real Raft replicas over
 // real TCP each with their own on-disk storage; insert vectors; kill one node's process
 // (Close both its transport and its storage engine); restart a fresh DurableNode against

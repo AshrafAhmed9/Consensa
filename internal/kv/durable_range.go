@@ -78,7 +78,27 @@ type DurableRange struct {
 	// cannot detect a range that is small by key count but genuinely hot under a skewed
 	// access pattern.
 	requestCount atomic.Uint64
+
+	// retired is set once this range's data has been fully migrated to two child ranges
+	// and routing metadata has switched over (executeSplitIfRecommended, cmd/consensa).
+	// Before this field existed, a parent range was deliberately left running forever
+	// after a split (docs/notes/12-split-repair.md's stated simplification) -- which meant
+	// it kept accepting Put/Delete/Get indefinitely for keys that had already moved to a
+	// child, silently diverging from the data the rest of the system now considers
+	// authoritative. See ErrRangeKeyMismatch's own doc comment for why the correct
+	// response is the same one a stale client route already gets: reject and let the
+	// caller refresh, rather than accept a write only this now-obsolete replica will ever
+	// see.
+	retired atomic.Bool
 }
+
+// MarkRetired permanently stops this replica from serving Put/Delete/Get, once and only
+// once its data is confirmed fully migrated to child ranges and routing has switched (or
+// is about to). Irreversible by design: a range that has been split is never un-split.
+func (r *DurableRange) MarkRetired() { r.retired.Store(true) }
+
+// Retired reports whether MarkRetired has been called on this replica.
+func (r *DurableRange) Retired() bool { return r.retired.Load() }
 
 // RequestCount returns the total number of Put/Delete/Get calls this replica has served
 // since it started -- see the requestCount field's own doc comment for why this is a raw
@@ -222,6 +242,9 @@ func (r *DurableRange) AddPeerAddress(id raft.NodeID, address string) error {
 // comment for the client-retry pattern this requires.
 func (r *DurableRange) Put(key, value []byte) error {
 	r.requestCount.Add(1)
+	if r.retired.Load() {
+		return ErrRangeKeyMismatch
+	}
 	if err := validateRangeKey(key); err != nil {
 		return err
 	}
@@ -235,6 +258,9 @@ func (r *DurableRange) Put(key, value []byte) error {
 // Delete proposes a key removal. See Put for the leader contract.
 func (r *DurableRange) Delete(key []byte) error {
 	r.requestCount.Add(1)
+	if r.retired.Load() {
+		return ErrRangeKeyMismatch
+	}
 	if err := validateRangeKey(key); err != nil {
 		return err
 	}
@@ -256,6 +282,9 @@ func (r *DurableRange) Delete(key []byte) error {
 // the KV plane linearizable. A caller needing that guarantee wants ConsistentGet instead.
 func (r *DurableRange) Get(key []byte) ([]byte, error) {
 	r.requestCount.Add(1)
+	if r.retired.Load() {
+		return nil, ErrRangeKeyMismatch
+	}
 	return r.db.Get(key, storage.HLC{WallTime: math.MaxInt64})
 }
 

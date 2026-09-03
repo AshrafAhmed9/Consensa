@@ -148,13 +148,27 @@ that had already arrived locally via ordinary replication. `putAndConfirm` now c
 `Get` on every iteration regardless of whether `Put` itself succeeded this round.
 
 **What this still does not prove, stated plainly:** transaction bookkeeping keys
-(`txn/...`) are now deliberately excluded from migration, not moved with the data they
-describe -- acceptable because the parent range is kept around rather than deleted (so
-any in-flight transaction's own bookkeeping remains locally readable there), but a
-transaction that happens to still be in flight at the exact moment a split executes is an
-edge case this project has not modeled further. There is still no *in-flight request*
-cutover (an RPC already routed to the parent mid-split does not get redirected; a client
-must complete its current attempt, then re-route on its next one). The "rebuild from scratch" strategy remains the most expensive of the
+(`txn/...`) are still deliberately excluded from migration, not moved with the data they
+describe -- originally justified on the grounds that the parent range is kept around
+rather than deleted, so any in-flight transaction's own bookkeeping remains locally
+readable there. **Update: that justification is now narrower than it reads above.**
+The parent range is still kept around, not deleted, but it no longer accepts *any*
+request once retired -- `DurableRange.MarkRetired()` (called right after migration, right
+before the new routing is published) makes `Get` return `ErrRangeKeyMismatch` on the
+parent just like `Put`/`Delete`, for every key including `txn/...` bookkeeping. A
+transaction whose bookkeeping still lives on a parent that has since retired loses read
+access to it too, same as any other post-split reader; this project still has not
+modeled that edge case further. What *is* now fixed is the bigger problem: before this,
+an RPC already routed to the parent mid-split, or one arriving in the brief window before
+the new routing was published, would silently succeed against data that had already
+moved to a child, with no error and no signal that anything was wrong. Now `MarkRetired()`
+is called before `meta.Replace` publishes the new routing, so the parent stops accepting
+requests before a client could even be told to stop sending them there; the caller gets
+`ErrRangeKeyMismatch` and retries through the existing stale-route-refresh contract,
+rather than reading or writing state that has already diverged from the children. See
+`docs/adr/013-parent-range-retirement.md`. This does not claim a zero-window guarantee
+across independently-updated process-local views of routing -- only that the parent
+itself can no longer be the source of silent divergence. The "rebuild from scratch" strategy remains the most expensive of the
 three named options -- real production use would want incremental repair or a
 stale-parent-during-rebuild fallback to avoid the latency cliff every key pays while
 being re-inserted one at a time.

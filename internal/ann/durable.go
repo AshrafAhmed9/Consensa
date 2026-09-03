@@ -31,11 +31,27 @@ type DurableNode struct {
 	// this type's, and it exists so cmd/consensa's split-check loop can derive a real
 	// per-range QPS for SplitTrigger.QPS.
 	requestCount atomic.Uint64
+
+	// retired mirrors kv.DurableRange's own field of the same name exactly, and exists for
+	// the identical reason: once this range's vectors are fully migrated to two children
+	// and routing has switched (executeAnnSplitIfRecommended, cmd/consensa), this replica
+	// must stop serving Insert/Delete/Search/GetVector rather than being left running
+	// forever as a silently-diverging duplicate of data the rest of the system now
+	// considers owned elsewhere.
+	retired atomic.Bool
 }
 
 // RequestCount returns the total number of Insert/Delete/Search/GetVector calls this
 // replica has served since it started -- see the requestCount field's own doc comment.
 func (d *DurableNode) RequestCount() uint64 { return d.requestCount.Load() }
+
+// MarkRetired permanently stops this replica from serving Insert/Delete/Search/GetVector,
+// once and only once its data is confirmed fully migrated to child ranges. See
+// kv.DurableRange.MarkRetired's own doc comment.
+func (d *DurableNode) MarkRetired() { d.retired.Store(true) }
+
+// Retired reports whether MarkRetired has been called on this replica.
+func (d *DurableNode) Retired() bool { return d.retired.Load() }
 
 // DurableNodeConfig names everything one replica needs: its own storage directory (reused
 // verbatim across a restart), the fixed Raft group membership, its own listen address, and
@@ -133,6 +149,9 @@ func (d *DurableNode) ProposeConfChange(voters, learners []raft.NodeID) error {
 // proposeToLeader does.
 func (d *DurableNode) Insert(id string, v vector.Vector) error {
 	d.requestCount.Add(1)
+	if d.retired.Load() {
+		return ErrRangeKeyMismatch
+	}
 	data, err := EncodeMutation(id, v)
 	if err != nil {
 		return err
@@ -143,6 +162,9 @@ func (d *DurableNode) Insert(id string, v vector.Vector) error {
 // Delete proposes a deterministic deletion mutation. See Insert for the leader contract.
 func (d *DurableNode) Delete(id string) error {
 	d.requestCount.Add(1)
+	if d.retired.Load() {
+		return ErrRangeKeyMismatch
+	}
 	data, err := EncodeDeleteMutation(id)
 	if err != nil {
 		return err
@@ -155,6 +177,9 @@ func (d *DurableNode) Delete(id string) error {
 // determinism guarantee), so any replica -- not only the leader -- may safely serve reads.
 func (d *DurableNode) Search(query vector.Vector, k, ef int) ([]Result, error) {
 	d.requestCount.Add(1)
+	if d.retired.Load() {
+		return nil, ErrRangeKeyMismatch
+	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.index.Search(query, k, ef)
@@ -170,7 +195,18 @@ func (d *DurableNode) Validate(v vector.Vector) error {
 // GetVector returns an exact vector already applied to this replica's graph. It is safe
 // for recovery-time BatchGet because NewDurableNode rebuilds the graph from durable Raft
 // state before returning to its caller.
+//
+// Once retired, it always reports "not found" rather than returning stale data -- this
+// method's (vector.Vector, bool) signature has no error channel to carry
+// ErrRangeKeyMismatch through (unlike Insert/Delete/Search), and its callers
+// (server.Service's BatchGet, execute_split.go's own confirm-visible polling) already
+// treat "not found" as a safe, correct signal to fall back on -- what matters for
+// correctness is that a retired replica never hands back an answer, not the specific
+// shape of its refusal.
 func (d *DurableNode) GetVector(id string) (vector.Vector, bool) {
+	if d.retired.Load() {
+		return nil, false
+	}
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.index.GetVector(id)
