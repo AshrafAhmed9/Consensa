@@ -72,12 +72,45 @@ const (
 // version on.
 type DurableStore struct {
 	rng rangeClient
+	// maxOffset is the durable-path twin of Store.maxOffset -- see SetMaxOffset and
+	// ReadAtTimestamp below, and Store.ReadAtTimestamp's doc comment for the full argument.
+	// Zero (NewDurableStore's default) disables uncertainty checking, matching Store's own
+	// opt-in default.
+	maxOffset time.Duration
 }
 
 // NewDurableStore wraps any rangeClient (a *kv.DurableRange in production) as a
 // Participant.
 func NewDurableStore(rng rangeClient) *DurableStore {
 	return &DurableStore{rng: rng}
+}
+
+// SetMaxOffset configures the clock-uncertainty window ReadAtTimestamp enforces, mirroring
+// Store.SetMaxOffset for the durable path.
+func (d *DurableStore) SetMaxOffset(maxOffset time.Duration) { d.maxOffset = maxOffset }
+
+// ReadAtTimestamp is the durable-path twin of Store.ReadAtTimestamp -- see its doc comment
+// (intent.go) for the full uncertainty-interval argument this mirrors. It queries the same
+// durably persisted lastWritePrefix index RefreshReads already reads, so no new durable
+// state is introduced: uncertainty checking is a read-time policy layered over data this
+// store already tracks.
+func (d *DurableStore) ReadAtTimestamp(key []byte, ts Timestamp) ([]byte, error) {
+	if d.maxOffset > 0 {
+		if last, ok := d.lastWriteTimestamp(key); ok {
+			if last.Compare(ts) > 0 && last.WallTime <= ts.WallTime+d.maxOffset.Nanoseconds() {
+				return nil, ErrUncertainRead
+			}
+		}
+	}
+	return d.rng.Get(key)
+}
+
+// UncertaintyRestartTimestamp mirrors Store.UncertaintyRestartTimestamp: the timestamp a
+// caller must retry ReadAtTimestamp at after ErrUncertainRead, strictly past the uncertain
+// write so the retry cannot observe the identical value as uncertain again.
+func (d *DurableStore) UncertaintyRestartTimestamp(key []byte) Timestamp {
+	last, _ := d.lastWriteTimestamp(key)
+	return Timestamp{WallTime: last.WallTime, Logical: last.Logical + 1}
 }
 
 // putAndConfirm proposes key/value and blocks until it reads back locally, closing the

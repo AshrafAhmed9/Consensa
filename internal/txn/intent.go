@@ -1,6 +1,9 @@
 package txn
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // Status is the sole authority for resolving a provisional write.
 type Status uint8
@@ -38,6 +41,11 @@ type Store struct {
 	// read it?" without keeping full MVCC history, since a single more-recent timestamp
 	// is sufficient to prove a read is stale (see RefreshReads's own doc comment).
 	lastWrite map[string]Timestamp
+	// maxOffset is the clock-uncertainty window ReadAtTimestamp enforces (see its own doc
+	// comment). Zero (NewStore's default) disables the check entirely -- an existing
+	// caller that never opts in via SetMaxOffset sees identical behavior to before this
+	// field existed, matching how RecordRead's serializable protection is opt-in too.
+	maxOffset time.Duration
 }
 
 // NewStore creates an empty transaction participant.
@@ -53,6 +61,64 @@ func NewStore() *Store {
 // docs/notes/14-serializable.md) can register it explicitly before WriteIntent is asked to
 // write below that timestamp; ErrWriteBelowObservedRead is what closes the loop.
 func (s *Store) RecordRead(key []byte, ts Timestamp) { s.reads.RecordRead(key, ts) }
+
+// SetMaxOffset configures the clock-uncertainty window ReadAtTimestamp enforces -- the
+// maximum clock skew this store's node is assumed to have relative to any other node in
+// the cluster. Follows the same config-knob pattern as kv.DurableRangeConfig's tunables
+// (ElectionTick, HeartbeatTick, ...): a plain settable field with a safe zero value
+// (disabled), not a constructor parameter, so it stays optional for every existing caller
+// of NewStore.
+func (s *Store) SetMaxOffset(maxOffset time.Duration) { s.maxOffset = maxOffset }
+
+// ErrUncertainRead is returned by ReadAtTimestamp when the value it would return was
+// committed at a timestamp inside the reader's own uncertainty window -- see
+// ReadAtTimestamp's doc comment for the full argument.
+var ErrUncertainRead = errors.New("txn: read observed a value inside the clock-uncertainty window")
+
+// ReadAtTimestamp reads key as a transaction reading at ts would see it, honoring the
+// clock-uncertainty interval docs/notes/14-serializable.md named as future work: a read at
+// ts from a node whose clock may be skewed by up to MaxOffset relative to the node that
+// committed some other write cannot be sure whether that write "happened before" it in real
+// time. If the value currently held for key was committed at ts' where
+// ts < ts' <= ts+MaxOffset, this store cannot rule out that ts' actually preceded ts in real
+// time (a faster clock could have produced a higher HLC reading for an event that really
+// happened first) -- so, rather than risk silently missing a write that was really causally
+// before it, ReadAtTimestamp refuses to answer and returns ErrUncertainRead. The caller
+// must restart its read at a timestamp past the uncertain value
+// (UncertaintyRestartTimestamp) rather than retry at the same ts, which would hit the
+// identical uncertain value again. This is the same design CockroachDB uses (and the
+// standard fix for HLC-based serializable systems generally): push past the uncertain value
+// once, rather than wait out the whole window, because a single restart at ts'+1 is
+// provably past every write that could have raced with the original read.
+//
+// This store keeps only the latest value per key (no MVCC history), so unlike a real
+// multi-version store, ReadAtTimestamp cannot distinguish "the value I'd return was
+// committed inside my uncertainty window" from "an even newer value already overwrote the
+// one I should have seen" -- both look identical here (there's only ever one value per
+// key). That's a real, stated limitation: it means ReadAtTimestamp can restart a read that
+// a full MVCC store would not have needed to (any write to the key at all inside the window
+// forces a restart, not just one that raced with this specific read), which is conservative
+// -- safe, but not maximally permissive. See docs/notes/14-serializable.md.
+func (s *Store) ReadAtTimestamp(key []byte, ts Timestamp) ([]byte, error) {
+	if s.maxOffset > 0 {
+		if last, ok := s.lastWrite[string(key)]; ok {
+			if last.Compare(ts) > 0 && last.WallTime <= ts.WallTime+s.maxOffset.Nanoseconds() {
+				return nil, ErrUncertainRead
+			}
+		}
+	}
+	return s.Get(key)
+}
+
+// UncertaintyRestartTimestamp returns the timestamp a caller must retry ReadAtTimestamp at
+// after receiving ErrUncertainRead for key: strictly past the uncertain write, so the
+// retried read cannot observe the identical value as uncertain again. Returns the zero
+// Timestamp if key has no recorded write, which should not happen if ReadAtTimestamp had
+// just returned ErrUncertainRead for the same key on the same store.
+func (s *Store) UncertaintyRestartTimestamp(key []byte) Timestamp {
+	last := s.lastWrite[string(key)]
+	return Timestamp{WallTime: last.WallTime, Logical: last.Logical + 1}
+}
 
 // ErrWriteBelowObservedRead is returned when WriteIntent's timestamp collides with an
 // already-recorded later read on the same key -- the read-write edge snapshot isolation's

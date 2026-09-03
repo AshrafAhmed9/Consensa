@@ -1178,11 +1178,20 @@ the four weeks for that alone.
 
 **Definition of Done:**
 - [ ] The Phase 8 write-skew reproduction test **now fails to reproduce**, and is renamed
-      into the regression suite.
-- [ ] Torture gains a write-skew workload (doctor-on-call invariant: at least one doctor
-      always on call) — green under full nemesis.
-- [ ] Transaction restart rate before and after read-refresh, in the benchmark table,
-      showing the abort cost was measured and engineered down.
+      into the regression suite. **Not applicable to this codebase's actual history** —
+      `git log` shows no earlier commit where a write-skew test ever passed by
+      demonstrating the anomaly succeeding; the rejection mechanism landed in the same
+      commit that first added write-skew testing at all. See
+      `docs/notes/14-serializable.md`'s Status section for the full explanation. Left
+      unchecked rather than marked done for something that never literally existed.
+- [x] Torture gains a write-skew workload (doctor-on-call invariant: at least one doctor
+      always on call) — green under full nemesis. `cmd/doctortorture` +
+      `harness/torture/workload/doctors.py`, run at 30 seeds (not 200+, for a stated
+      wall-clock reason), zero violations. See `docs/notes/14-serializable.md`.
+- [x] Transaction restart rate before and after read-refresh, in the benchmark table,
+      showing the abort cost was measured and engineered down. Uncertainty intervals also
+      implemented and tested under simulated clock skew. See
+      `internal/txn/restart_rate_bench_test.go` and `docs/notes/14-serializable.md`.
 
 ---
 

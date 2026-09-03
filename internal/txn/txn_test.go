@@ -3,6 +3,8 @@ package txn
 import (
 	"testing"
 	"time"
+
+	"github.com/ashraf/consensa/internal/metrics"
 )
 
 // TestHLCObservePreservesCausality proves receiving a future timestamp cannot be followed by an earlier one.
@@ -28,6 +30,64 @@ func TestCoordinatorCommitsAcrossParticipants(t *testing.T) {
 	if v, _ := b.Get([]byte("b")); string(v) != "2" {
 		t.Fatal("missing b")
 	}
+}
+
+// TestCoordinatorCommitRecordsMetricsByOutcome proves consensa_txn_commits_total (added
+// for the Grafana transaction panel) is actually incremented by a real Commit call --
+// once for a success and once for a failure, each landing under its own "outcome" label,
+// not just present on the Registry with no caller ever exercising the Inc call in
+// Coordinator.Commit.
+func TestCoordinatorCommitRecordsMetricsByOutcome(t *testing.T) {
+	clock := NewClock(time.Now)
+	reg := metrics.NewRegistry()
+
+	ok := NewCoordinator(clock)
+	ok.SetMetrics(reg)
+	store := NewStore()
+	if err := ok.Commit("ok", map[Participant][]Intent{store: {{Key: []byte("k"), Value: []byte("v")}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	failing := NewCoordinator(clock)
+	failing.SetMetrics(reg)
+	// A nil Participant has no valid Record/WriteIntent behavior, so Prepare fails and
+	// Commit returns a non-nil error -- the "failure" outcome this test needs, without
+	// depending on any specific internal error path.
+	if err := failing.Commit("fail", map[Participant][]Intent{nil: {{Key: []byte("k"), Value: []byte("v")}}}); err == nil {
+		t.Fatal("expected Commit against a nil participant to fail")
+	}
+
+	if got := testutilCounterValue(t, reg, "consensa_txn_commits_total", "success"); got != 1 {
+		t.Fatalf("success commits = %v, want 1", got)
+	}
+	if got := testutilCounterValue(t, reg, "consensa_txn_commits_total", "failure"); got != 1 {
+		t.Fatalf("failure commits = %v, want 1", got)
+	}
+}
+
+// testutilCounterValue reads one label value off a CounterVec family by scanning
+// Gather() output directly, matching this package's existing style (no
+// prometheus/client_golang/testutil dependency) rather than introducing a new one just
+// for this test.
+func testutilCounterValue(t *testing.T, reg *metrics.Registry, family, outcome string) float64 {
+	t.Helper()
+	families, err := reg.Registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range families {
+		if f.GetName() != family {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if l.GetName() == "outcome" && l.GetValue() == outcome {
+					return m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
 }
 
 // TestCoordinatorAbortsPartiallyPreparedParticipant proves a conflict after an earlier

@@ -5,21 +5,24 @@ from pathlib import Path
 
 from harness.torture.history import History, read_history, write_history
 from harness.torture.nemesis import schedule
-from harness.torture.workload import register, vector
+from harness.torture.workload import doctors, register, vector
 
 
 def execute(seed: int, workload: str, nemeses: list[str]) -> bool:
     """Runs one deterministic reference workload and records only a failing schedule.
 
-    Both workloads now drive real Go state under the seed's fault schedule: register via
-    internal/raft.Cluster (cmd/torture), vector via internal/ann.HNSW replicas kept in
-    sync through the same Cluster (cmd/vectortorture). The seed and nemeses genuinely
-    determine the outcome for both.
+    All three workloads drive real Go state under the seed's fault schedule: register via
+    internal/raft.Cluster (cmd/torture), vector via internal/ann.HNSW replicas kept in sync
+    through the same Cluster (cmd/vectortorture), doctors via a real kv.DurableRange group
+    driven through internal/txn.Coordinator (cmd/doctortorture). The seed and nemeses
+    genuinely determine the outcome for all three.
     """
     if workload == "register":
         passed = register.run(seed, nemeses)
-    else:
+    elif workload == "vector":
         passed = vector.run(seed, nemeses)
+    else:
+        passed = doctors.run(seed, nemeses)
     events = [fault.__dict__ for fault in schedule(seed, nemeses, 20)]
     if not passed:
         write_history(Path("harness/torture/results") / f"seed-{seed}.json", History(seed, workload, events))
@@ -30,7 +33,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run")
-    run.add_argument("--workload", choices=["register", "vector"], required=True)
+    run.add_argument("--workload", choices=["register", "vector", "doctors"], required=True)
     run.add_argument("--nemesis", default="partition,crash")
     run.add_argument("--seeds", type=int, default=1)
     replay = sub.add_parser("replay")

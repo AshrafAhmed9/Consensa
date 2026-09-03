@@ -316,6 +316,25 @@ does *not* prove) lives — this section is a current index, not a replacement f
   `TestDurableStorePrepareAbortsWhenRefreshFindsAStaleRead`), the latter durably indexing
   each key's last-committed-write timestamp the same way its existing read/intent
   indexes work. See `docs/notes/14-serializable.md`.
+- **Uncertainty intervals close Phase 14's remaining named gap, and the doctors-on-call
+  write-skew workload runs in torture under full nemesis.** `Store.ReadAtTimestamp`/
+  `DurableStore.ReadAtTimestamp` (`internal/txn`) refuse to answer a read
+  (`ErrUncertainRead`) when the value they would return was committed inside the reader's
+  own `[ts, ts+max_offset]` clock-uncertainty window, and require a restart at
+  `UncertaintyRestartTimestamp` -- proven under simulated clock skew with two
+  independently-clocked `*Clock`s, both against the in-memory `Store`
+  (`TestReadAtTimestampRestartsUnderClockSkew`) and a real 3-node `kv.DurableRange` group
+  (`TestDurableStoreReadAtTimestampRestartsUnderClockSkew`). `cmd/doctortorture` drives the
+  same two-doctors-on-call anomaly at volume against a real Raft group under partition,
+  crash, and clock-skew nemesis (`harness/torture/workload/doctors.py`,
+  `--workload doctors`); run for real at 30 seeds (not the full suite's 200+, for a stated
+  wall-clock reason -- see `docs/notes/14-serializable.md`), zero invariant violations.
+  `TestTransactionRestartRateBenchmark` (`internal/txn/restart_rate_bench_test.go`)
+  measures real restart rates under a contended workload: read-refresh cuts the restart
+  rate from 98.2% to 57.5% against this benchmark's naive-abort baseline. Full numbers,
+  the uncertainty-interval benchmark caveat, and an honest accounting of which Phase 14 DoD
+  item does not literally apply to this codebase's actual commit history are in
+  `docs/notes/14-serializable.md`'s Status section.
 - **TLA+ now covers joint-consensus quorum intersection and recursive range splitting**,
   each checked by TLC with a required negative-control variant that must fail — proving
   the checker itself is discriminating, not just that the correct model happens to pass.
