@@ -7,12 +7,14 @@ graphify-out/
 # Go
 /consensa
 /consensa-cli
+/doctortorture
 *.test
 *.out
 coverage.*
 harness/bench/.annbench
 harness/torture/.torture-bin
 harness/torture/.vectortorture-bin
+harness/torture/.doctortorture-bin
 
 # Python harness
 __pycache__/

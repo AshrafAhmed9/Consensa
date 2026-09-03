@@ -25,11 +25,24 @@ func writeSSTable(dir string, generation uint64, records []record) (*sstable, er
 		return nil, nil
 	}
 	p := filepath.Join(dir, "sst-"+formatGeneration(generation)+".sst")
-	f, e := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	// Written to a temp file and renamed into place rather than truncated in place: a
+	// process killed mid-write (e.g. SIGTERM, which this binary does not currently trap --
+	// see cmd/consensa/main.go) would otherwise leave a torn, unparseable file at the final
+	// path, since openSSTable has no way to tell a genuinely corrupt table from one that was
+	// simply interrupted partway through writing. Renaming a fully-synced temp file into
+	// place is atomic on the same filesystem, so a kill mid-write leaves either the complete
+	// old generation (rename never happened) or the complete new one -- never a partial file
+	// -- matching this engine's own WAL-then-flush durability model.
+	tmp := p + ".tmp"
+	f, e := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if e != nil {
 		return nil, e
 	}
-	defer func() { _ = f.Close() }()
+	// No deferred Close: every path below either closes f explicitly before Rename (the
+	// success path) or returns straight from a write/Sync error, in which case f is left
+	// open and the process is expected to exit via the caller's fatal() -- matching this
+	// function's pre-existing error-handling level (no cleanup-on-error elsewhere in this
+	// file either) rather than adding asymmetric handling only here.
 	for _, r := range records {
 		header := make([]byte, 9)
 		if r.tombstone {
@@ -48,6 +61,12 @@ func writeSSTable(dir string, generation uint64, records []record) (*sstable, er
 		}
 	}
 	if e = f.Sync(); e != nil {
+		return nil, e
+	}
+	if e = f.Close(); e != nil {
+		return nil, e
+	}
+	if e = os.Rename(tmp, p); e != nil {
 		return nil, e
 	}
 	return &sstable{path: p, records: cloneRecords(records)}, nil

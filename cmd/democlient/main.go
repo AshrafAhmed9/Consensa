@@ -29,9 +29,10 @@ var authToken string
 
 func main() {
 	addrs := flag.String("addrs", "", "comma-separated gRPC addresses to try, in order, e.g. 127.0.0.1:8081,127.0.0.1:8082,127.0.0.1:8083")
-	action := flag.String("action", "upsert-and-search", "upsert-and-search | search-only | txn")
+	action := flag.String("action", "upsert-and-search", "upsert-and-search | search-only | txn | bulk-upsert")
 	timeout := flag.Duration("timeout", 15*time.Second, "how long to keep retrying across addrs before giving up")
 	token := flag.String("auth-token", "", "bearer token to present on every call (internal/auth); must match the target node's --auth-token, or be empty if it has none")
+	count := flag.Int("count", 200, "bulk-upsert only: how many synthetic vectors to write")
 	flag.Parse()
 	authToken = *token
 
@@ -47,6 +48,8 @@ func main() {
 		searchOnly(addrList, *timeout)
 	case "txn":
 		transactionalPut(addrList, *timeout)
+	case "bulk-upsert":
+		bulkUpsert(addrList, *timeout, *count)
 	default:
 		log.Fatalf("unknown --action %q", *action)
 	}
@@ -167,6 +170,30 @@ func printSearch(addrs []string, deadline time.Duration, query []float32, k int,
 	for _, r := range results {
 		fmt.Printf("  %-6s distance=%.4f\n", r.Id, r.Distance)
 	}
+}
+
+func bulkUpsert(addrs []string, deadline time.Duration, count int) {
+	for i := 0; i < count; i++ {
+		id := fmt.Sprintf("bulk-%04d", i)
+		v := []float32{float32(i%7) - 3, float32((i * 3) % 11), float32(i % 5), 0}
+		err := eachAddr(addrs, deadline, func(c consensav1.ConsensaClient) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			stream, err := c.Upsert(ctx)
+			if err != nil {
+				return err
+			}
+			if err := stream.Send(&consensav1.UpsertRequest{Id: id, Vector: &consensav1.Vector{Values: v}}); err != nil {
+				return err
+			}
+			_, err = stream.CloseAndRecv()
+			return err
+		})
+		if err != nil {
+			log.Fatalf("bulk upsert %q: %v", id, err)
+		}
+	}
+	fmt.Printf("  wrote %d vectors\n", count)
 }
 
 func transactionalPut(addrs []string, deadline time.Duration) {
