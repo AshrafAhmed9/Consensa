@@ -51,6 +51,91 @@
         }
       ],
       "description": "Recall is reported by an external benchmark after comparison with independent brute-force ground truth. A zero means either no report has been submitted or measured recall was zero; it is not a node-generated estimate."
+    },
+    {
+      "id": 4,
+      "title": "Raft leader elections per node",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "rate(consensa_raft_elections_total[5m])",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "description": "consensa_raft_elections_total counts this node's own election WINS only (isLeader transitioning false->true), not every term bump -- a healthy cluster should show this near zero outside of an intentional leadership transfer or a real node loss."
+    },
+    {
+      "id": 5,
+      "title": "Search latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "histogram_quantile(0.50, sum(rate(consensa_search_latency_seconds_bucket[5m])) by (le, instance))",
+          "legendFormat": "p50 {{instance}}"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "histogram_quantile(0.95, sum(rate(consensa_search_latency_seconds_bucket[5m])) by (le, instance))",
+          "legendFormat": "p95 {{instance}}"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "histogram_quantile(0.99, sum(rate(consensa_search_latency_seconds_bucket[5m])) by (le, instance))",
+          "legendFormat": "p99 {{instance}}"
+        }
+      ],
+      "description": "consensa_search_latency_seconds times server.Service.Search end-to-end (entry to completion), one observation per RPC. Quantiles are computed from the raw histogram buckets, not pre-aggregated, so they stay accurate across nodes with uneven traffic."
+    },
+    {
+      "id": 6,
+      "title": "Transaction commit rate by outcome",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "sum(rate(consensa_txn_commits_total[5m])) by (outcome, instance)",
+          "legendFormat": "{{instance}} {{outcome}}"
+        }
+      ],
+      "description": "consensa_txn_commits_total is incremented once per txn.Coordinator.Commit call, labeled success or failure -- a rising failure rate usually means real write conflicts (ErrWriteBelowObservedRead) rather than a coordinator bug, since Commit itself has no retry loop."
+    },
+    {
+      "id": 7,
+      "title": "Range splits executed",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "consensa_kv_split_executed_total",
+          "legendFormat": "{{parent_range_id}} -> {{left_range_id}}/{{right_range_id}}"
+        }
+      ],
+      "description": "consensa_kv_split_executed_total increments once a live split actually completes (not just when it was recommended -- see consensa_kv_split_recommended for the decision signal). Each split also appears as a vertical annotation across every panel on this dashboard, marked at the moment it executed."
     }
-  ]
+  ],
+  "annotations": {
+    "list": [
+      {
+        "name": "Range splits",
+        "datasource": { "type": "prometheus", "uid": "Prometheus" },
+        "enable": true,
+        "iconColor": "orange",
+        "target": {
+          "expr": "changes(consensa_kv_split_executed_total[1m]) > 0"
+        },
+        "titleFormat": "Split executed",
+        "textFormat": "{{parent_range_id}} -> {{left_range_id}}/{{right_range_id}} on {{instance}}"
+      }
+    ]
+  }
 }

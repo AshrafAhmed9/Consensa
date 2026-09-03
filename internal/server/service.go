@@ -5,6 +5,7 @@ import (
 	"errors"
 	consensav1 "github.com/ashraf/consensa/api/consensa/v1"
 	"github.com/ashraf/consensa/internal/ann"
+	"github.com/ashraf/consensa/internal/metrics"
 	"github.com/ashraf/consensa/internal/raft"
 	"github.com/ashraf/consensa/internal/vector"
 	"google.golang.org/grpc/codes"
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Index is the narrow vector mutation/query contract shared by a local and Raft-backed index.
@@ -44,7 +46,14 @@ type Service struct {
 	indices      map[uint64]Index
 	vectors      map[string]vector.Vector
 	requestCount atomic.Uint64
+	metrics      *metrics.Registry
 }
+
+// SetMetrics attaches the process-wide metrics registry so Search can record real request
+// latency. Optional and separate from NewService (rather than an added constructor
+// parameter) so every existing call site -- production and test -- keeps working
+// unmodified; a Service with no attached registry just skips the Observe call below.
+func (s *Service) SetMetrics(m *metrics.Registry) { s.metrics = m }
 
 // NewService creates an API service with a single configured HNSW index, spanning the
 // entire ID space as range 1 -- the same single-range starting shape kv.NewMeta's two
@@ -175,6 +184,10 @@ func (s *Service) Upsert(stream consensav1.Consensa_UpsertServer) error {
 // one range, matching how a real split leaves the vectors nearest any given query
 // potentially on either side of the new boundary.
 func (s *Service) Search(r *consensav1.SearchRequest, stream consensav1.Consensa_SearchServer) error {
+	start := time.Now()
+	if s.metrics != nil {
+		defer func() { s.metrics.SearchLatency.Observe(time.Since(start).Seconds()) }()
+	}
 	s.requestCount.Add(1)
 	if r.Query == nil || len(r.Query.Values) == 0 || r.K == 0 {
 		return status.Error(codes.InvalidArgument, "query and positive k are required")

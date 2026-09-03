@@ -1,6 +1,10 @@
 package txn
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/ashraf/consensa/internal/metrics"
+)
 
 // Participant is what the coordinator needs from a transaction range -- record storage
 // plus provisional intent installation and resolution. *Store (in-memory, for tests and
@@ -23,10 +27,19 @@ type Participant interface {
 }
 
 // Coordinator drives a minimal two-phase commit across participant stores.
-type Coordinator struct{ clock *Clock }
+type Coordinator struct {
+	clock   *Clock
+	metrics *metrics.Registry
+}
 
 // NewCoordinator creates a coordinator using an HLC for transaction timestamps.
 func NewCoordinator(clock *Clock) *Coordinator { return &Coordinator{clock: clock} }
+
+// SetMetrics attaches the process-wide metrics registry so Commit can record outcomes.
+// Optional and separate from NewCoordinator, the same way server.Service.SetMetrics is,
+// so every existing call site -- production and the package's own unit tests -- keeps
+// working unmodified; a Coordinator with no attached registry just skips the Inc call.
+func (c *Coordinator) SetMetrics(m *metrics.Registry) { c.metrics = m }
 
 // WriteSet names one participant and the intents it must prepare. A slice, rather than a
 // map, deliberately preserves the first writer as the transaction-record anchor; this
@@ -222,7 +235,16 @@ func (c *Coordinator) Resolve(txn *Transaction) error {
 
 // Commit writes all intents then resolves them committed. A preparation failure aborts all
 // participants that accepted an intent, preserving atomic visibility in this model.
-func (c *Coordinator) Commit(id string, writes map[Participant][]Intent) error {
+func (c *Coordinator) Commit(id string, writes map[Participant][]Intent) (err error) {
+	if c.metrics != nil {
+		defer func() {
+			outcome := "success"
+			if err != nil {
+				outcome = "failure"
+			}
+			c.metrics.TxnCommits.WithLabelValues(outcome).Inc()
+		}()
+	}
 	sets := make([]WriteSet, 0, len(writes))
 	for store, intents := range writes {
 		sets = append(sets, WriteSet{Store: store, Intents: intents})

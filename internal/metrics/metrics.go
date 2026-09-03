@@ -10,6 +10,9 @@ type Registry struct {
 	Recall           prometheus.Gauge
 	SplitRecommended *prometheus.GaugeVec
 	SplitExecuted    *prometheus.CounterVec
+	RaftElections    prometheus.Counter
+	SearchLatency    prometheus.Histogram
+	TxnCommits       *prometheus.CounterVec
 }
 
 // NewRegistry creates an isolated registry, useful for both one node and deterministic tests.
@@ -34,6 +37,43 @@ func NewRegistry() *Registry {
 		Name: "consensa_kv_split_executed_total",
 		Help: "Incremented once a live split of parent_range_id into left_range_id/right_range_id has actually completed.",
 	}, []string{"parent_range_id", "left_range_id", "right_range_id"})
-	r.MustRegister(term, qps, recall, splitRecommended, splitExecuted)
-	return &Registry{Registry: r, RaftTerm: term, RangeQPS: qps, Recall: recall, SplitRecommended: splitRecommended, SplitExecuted: splitExecuted}
+	// Incremented once, in cmd/consensa's own Raft tick loop, each time this node's local
+	// view of leadership (ann.DurableNode.Status's isLeader) transitions from false to
+	// true -- a real election win, not just a term bump (a term can advance without this
+	// node ever becoming leader). Kept a plain Counter rather than pushing the detection
+	// into internal/raft: the tick loop already samples Status() every tick for
+	// consensa_raft_term, so diffing consecutive isLeader values there is the same
+	// zero-blast-radius pattern that metric already uses.
+	elections := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "consensa_raft_elections_total",
+		Help: "Incremented each time this node's local Raft view transitions to leader.",
+	})
+	// consensa_search_latency_seconds times server.Service.Search end-to-end, from the
+	// first line of the RPC handler to its final SendAndClose/return -- the closest real
+	// stand-in for PLAN.md's "search latency histograms" panel, since no other timing
+	// signal for the Search path exists in this codebase yet.
+	searchLatency := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "consensa_search_latency_seconds",
+		Help:    "Latency of the Search RPC handler, from entry to completion.",
+		Buckets: prometheus.DefBuckets,
+	})
+	// consensa_txn_commits_total counts every internal/txn.Coordinator.Commit call by
+	// outcome ("success" or "failure"), labeled the same way splitExecuted labels its own
+	// outcome dimension above.
+	txnCommits := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "consensa_txn_commits_total",
+		Help: "Transactions committed via txn.Coordinator.Commit, by outcome.",
+	}, []string{"outcome"})
+	r.MustRegister(term, qps, recall, splitRecommended, splitExecuted, elections, searchLatency, txnCommits)
+	return &Registry{
+		Registry:         r,
+		RaftTerm:         term,
+		RangeQPS:         qps,
+		Recall:           recall,
+		SplitRecommended: splitRecommended,
+		SplitExecuted:    splitExecuted,
+		RaftElections:    elections,
+		SearchLatency:    searchLatency,
+		TxnCommits:       txnCommits,
+	}
 }

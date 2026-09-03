@@ -561,14 +561,16 @@ func main() {
 	if err != nil {
 		fatal("creating KV range descriptors", "error", err)
 	}
+	coordinator := txn.NewCoordinator(txn.NewClock(time.Now))
 	kvService := server.NewKVService(
 		kv.NewRouter(meta),
-		txn.NewCoordinator(txn.NewClock(time.Now)),
+		coordinator,
 		map[uint64]txn.Participant{1: txn.NewDurableStore(leftRange), 2: txn.NewDurableStore(rightRange)},
 	)
 	adminService := server.NewAdminService(map[uint64]server.MembershipTarget{1: leftRange, 2: rightRange})
 
 	metricRegistry := metrics.NewRegistry()
+	coordinator.SetMetrics(metricRegistry)
 
 	// Raft only makes progress when something drives its clock; production wires that to
 	// a real timer instead of the deterministic simulator's stepped scheduler tests use.
@@ -593,6 +595,12 @@ func main() {
 		ticker := time.NewTicker(*tickInterval)
 		defer ticker.Stop()
 		ticks := 0
+		// wasLeader tracks this node's own last-observed leadership so consensa_raft_
+		// elections_total only counts real election WINS (false->true transitions), not
+		// every tick this node happens to already be leader -- see RaftElections's own
+		// doc comment in internal/metrics/metrics.go for why this is computed here rather
+		// than inside internal/raft itself.
+		wasLeader := false
 		for {
 			select {
 			case <-stopTicking:
@@ -612,8 +620,12 @@ func main() {
 				// Recall is reported separately by an external benchmark through
 				// /report-recall. RangeQPS is set separately below, since it is a rate over
 				// a fixed window rather than an instantaneous value like the Raft term.
-				_, term, _ := node.Status()
+				_, term, isLeader := node.Status()
 				metricRegistry.RaftTerm.Set(float64(term))
+				if isLeader && !wasLeader {
+					metricRegistry.RaftElections.Inc()
+				}
+				wasLeader = isLeader
 			}
 		}
 	}()
@@ -737,6 +749,7 @@ func main() {
 	// --peers -- this binary does not yet forward writes to the leader on a client's
 	// behalf. Reads (Search/Validate) are served locally regardless of leadership.
 	service := server.NewService(node)
+	service.SetMetrics(metricRegistry)
 
 	// startTickingAnn mirrors startTicking (above) for a live split's fresh vector-plane
 	// children, reusing the identical stopTicking channel every other range's ticking
