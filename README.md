@@ -1,5 +1,7 @@
 # Consensa
 
+[![CI](https://github.com/AshrafAhmed9/Consensa/actions/workflows/ci.yml/badge.svg)](https://github.com/AshrafAhmed9/Consensa/actions/workflows/ci.yml)
+
 A distributed vector database, built from scratch in Go: a hand-written Raft consensus
 implementation, a durable MVCC storage engine, an HNSW approximate-nearest-neighbor
 index, cross-shard transactions, and a chaos-testing harness that attacks all of it with
@@ -58,10 +60,11 @@ claim.
 ./demo.sh
 ```
 
-brings up a real 3-node cluster, upserts and searches vectors, commits a cross-range
-transaction, kills a node's real process, shows the surviving majority still answers
-correctly, then restarts the killed node and shows it recovers from its own on-disk log
--- printing real Prometheus metrics scraped from a live process at the end. It uses
+brings up a real 3-node cluster and walks it through the whole system live: auth-gated
+writes and searches, a cross-range transaction, a shard splitting automatically under
+load and merging back once it's cold, a node getting killed mid-run, and the survivors
+carrying on while the killed node recovers from its own on-disk log — ending with real
+Prometheus metrics pulled straight from a running process. It uses
 [`cmd/democlient`](cmd/democlient), a small real gRPC client, not a mock.
 
 Or run nodes by hand:
@@ -94,7 +97,7 @@ does and doesn't cover, is in [`docs/correctness.md`](docs/correctness.md).
 | **The shipped binary** | An end-to-end test builds the real `consensa` binary, runs three real OS processes, kills one mid-write, and checks the survivors and the recovered process over real gRPC. |
 | **Chaos testing** | A seeded Python harness drives real partitions, process kills, and clock skew against real Raft clusters and checks the resulting history for linearizability (via [Porcupine](https://github.com/anishathalye/porcupine)) and search-result correctness. |
 | **Cross-shard transactions** | A 2PC coordinator commits atomically across two independent 3-node Raft groups, reachable over a real gRPC call, and survives a coordinator crash mid-commit. |
-| **Live range splits** | A shard splits into two fresh replica groups with no vector or key lost, duplicated, or leaking across the new boundary — proven on both the KV and vector planes, including publishing the new routing metadata atomically so both a fresh client and one holding a pre-split cached route resolve correctly afterward. Both planes now do this fully automatically inside the running binary, not just as a library primitive — real writes crossing a threshold trigger real child Raft groups standing up and taking over live traffic. |
+| **Live range splits and merges** | A shard splits into two fresh replica groups with no vector or key lost, duplicated, or leaking across the new boundary — proven on both the KV and vector planes, including publishing the new routing metadata atomically so both a fresh client and one holding a pre-split cached route resolve correctly afterward. Both planes do this fully automatically inside the running binary, not just as a library primitive — real writes crossing a threshold trigger real child Raft groups standing up and taking over live traffic, and once both children go cold they merge back the same way. |
 | **Joint-consensus membership changes** | Adding, promoting, or removing a replica goes through Raft's two-phase joint-consensus protocol, so a disjoint old/new majority can never both elect a leader — the specific failure mode joint consensus exists to prevent is covered directly. This now includes provisioning a genuinely new, previously-unknown process, reachable over a real, optionally auth-gated `ConsensaAdmin` gRPC surface, not just an internal Go primitive. |
 | **Read-path ladder** | Leader reads via a quorum-confirmed barrier (`ReadIndex`); follower reads via a replicated lease and closed timestamp, rejected until both are actually valid — not just modeled. |
 | **Write-skew prevention** | The classic "two on-call doctors" anomaly is reproduced and the specific write that would complete it is rejected, on both the in-memory and Raft-replicated code paths; a transaction pushed by that check can also read-refresh and commit anyway instead of always aborting, proven on both paths too. |
@@ -113,9 +116,9 @@ including the ones later sessions overturned.
 - **`internal/storage`** — an LSM-tree key/value engine: WAL, skiplist memtable, sorted
   SSTables, MVCC versioning by hybrid-logical-clock timestamp.
 - **`internal/ann`** — HNSW, including the neighbor-selection heuristic that makes it
-  outperform naive top-M graphs, plus the split-and-rebuild strategy that keeps search
-  correct after a shard splits.
-- **`internal/kv`** — range sharding, routing, and the split-trigger decision.
+  outperform naive top-M graphs, plus the split-repair and merge strategies that keep
+  search correct as a shard's boundaries change live.
+- **`internal/kv`** — range sharding, routing, and the split/merge trigger decisions.
 - **`internal/txn`** — HLC, write intents, a two-phase commit coordinator, and the
   timestamp-cache defense against write skew.
 - **`api/consensa/v1`** — the gRPC contract: streaming `Upsert`/`Search`, `TransactionalPut`.
@@ -159,7 +162,7 @@ specific limit of the current design, not a vague disclaimer.
   toward the split executor when it can, which covers the common case, but
   `TransferLeadershipTo` can only be initiated by the current leader handing off, so a
   process that never held that leadership has no way to request it — convergence isn't
-  guaranteed on any particular schedule (`docs/adr/014-live-range-merges.md`).
+  guaranteed on any particular schedule.
 - **Membership changes** go through joint consensus end to end, including provisioning a
   genuinely new process over gRPC (`ConsensaAdmin.AddReplica`/`PromoteReplica`), and
   `consensa-cli join` scripts the add-then-promote sequence for you — though it still
