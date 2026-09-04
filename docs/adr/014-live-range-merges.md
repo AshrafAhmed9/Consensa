@@ -43,3 +43,19 @@ for any adjacent, cold, identically-placed pair. The two original static ranges 
 vector plane's original range) can therefore never merge, even though they satisfy
 `MergeDescriptors`' own adjacency check. Extending eligibility to the full catalog is
 future work, not a correctness gap in what merge does once it decides to run.
+
+`executeKVMergeIfRecommended`/`executeANNMergeIfRecommended` run unconditionally on every
+process's own tick loop, using that process's own local child handle to call
+`Freeze`/`ExecuteLiveMerge` -- there is no check that the local replica is actually the
+current Raft leader of the left child before proposing the migration writes into it. A
+propose against a non-leader replica fails, so on any process that isn't currently
+leading the left child, the migration keeps retrying and failing every tick, and the
+merge only succeeds on whichever process happens to hold that leadership. Because the
+split and the merge attempt both run on whatever process led the *parent* range, and a
+freshly created child range elects its own leader independently, that process is not
+guaranteed to also lead the left child -- correctness is unaffected (a failed attempt is
+a no-op, not a partial write), but the merge can sit retrying for as long as it takes the
+existing leadership-affinity policy to converge the left child's leadership onto that
+same process, rather than completing as soon as both ranges go cold. Confirmed directly:
+running the merge demo showed exactly this pattern, the split's own process retrying and
+failing for tens of seconds while the other two processes never attempted it at all.

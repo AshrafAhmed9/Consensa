@@ -122,69 +122,61 @@ including the ones later sessions overturned.
 - **`harness/`** — the Python chaos-testing control plane and checkers.
 - **`specs/`** — TLA+ models of the two hardest correctness properties.
 
-## What's not done yet
+## Known limits
 
-Cold ranges created as sibling children by an automatic split now merge automatically on
-both planes once `--merge-threshold` and `--merge-qps-threshold` are enabled and both
-children remain below those floors for a measured QPS window. The right child commits a
-freeze barrier, folds into the left child’s existing Raft group, is retired, and is then
-removed from routing through `Meta.Replace`; a stale route receives the same retryable
-range-mismatch error used after splits. This proves same-placement sibling consolidation,
-not immediate metadata convergence across processes or a merge that first moves replicas.
+Split and merge are both fully automatic now, on both planes, inside the running binary
+— not library primitives you'd have to wire up yourself. Everything below is a real,
+specific limit of the current design, not a vague disclaimer.
 
-Stated plainly rather than left implied: `cmd/consensa` now automatically executes a live
-split on both planes -- standing up fresh child Raft groups at runtime on the same shared
-transport, migrating data, and cutting real traffic over -- once each plane's own
-split-trigger decision recommends one (`kv.ExecuteLiveSplit`/`ann.ExecuteLiveSplitByRepair`,
-`TestConsensaBinaryExecutesALiveSplitAutomatically`/`TestConsensaBinaryExecutesALiveVectorSplitAutomatically`).
-The vector plane's split boundary is a lexicographic ID bisection, not a clustering-aware
-vector-space boundary -- measured to cost 37.7% relative recall right after a split
-(`docs/adr/011-vector-split-boundary.md`). Each child's graph is now seeded by a single
-replicated, deterministic repair of the parent's own graph (drop cross-boundary edges,
-then backfill replacement neighbors so pruned nodes aren't left under-connected) instead
-of a from-scratch rebuild -- measured at recall parity with rebuild (within 5% relative)
-while replicating in one Raft entry per child instead of one per vector
-(`docs/adr/012-replicated-incremental-repair.md`). The boundary choice itself is
-unchanged and remains real, unimplemented future work. The parent range no longer
-silently keeps serving stale reads and writes after a split: `MarkRetired()` flips it
-into a rejecting state (`kv.ErrRangeKeyMismatch`/`ann.ErrRangeKeyMismatch` on every
-Put/Get/Delete or Insert/Search/GetVector) before `meta.Replace` publishes the new
-routing, so a request already in flight against the parent, or one that lands in the
-brief window before routing updates, fails and retries through the same
-stale-route-refresh contract `RoutedKV` already relies on elsewhere -- instead of
-succeeding against data that has already moved. This closes the silent-divergence risk;
-it does not claim a zero-window guarantee across independent processes' local views. The
-split trigger is no longer size-only: both
-planes now also support a QPS threshold (`--split-qps-threshold`, off by default), so a
-range that is small by key/vector count but genuinely hot under a skewed access pattern
-can still recommend a split -- `kv.ShouldSplit`/`ann.ShouldSplit` fire on either active
-criterion, backed by a real per-range request counter and a live rate sampled the same
-way the existing QPS metric already was. Joint consensus can now provision a genuinely new, previously-unknown
-process too, reachable over a real `ConsensaAdmin.AddReplica`/`PromoteReplica` gRPC
-surface -- `cmd/consensa` now exposes it, not just `internal/raft`'s own primitives, and
-every RPC across all three services is now gated by an optional shared-secret bearer-token
-layer (`--auth-token`, off by default; see `docs/notes/13-auth.md` and `internal/auth`),
-with `ConsensaAdmin` independently scopable via `--admin-auth-token` so a leaked
-data-plane credential can't drive membership changes -- within each scope, no per-user
-identity, no rotation, or transport encryption of its own, stated plainly rather than
-left implied. The operator side of that sequence (`AddReplica` against every existing
-replica, then `PromoteReplica` against whoever leads) no longer has to be scripted by
-hand -- `cmd/consensa-cli join` automates it against real `ConsensaAdmin` servers, though
-it still requires the operator to supply every existing replica's address explicitly (no
-service discovery) and joins one named range at a time. Snapshot isolation now supports
-read-refresh (a pushed transaction re-validates its own prior reads instead of aborting
-outright), proven for both the in-memory `Store` and the real, Raft-replicated
-`DurableStore`; a running binary now advances the closed timestamp and automatically
-grants/renews follower-read leases on a
-real interval, but no RPC surface exposes follower reads to a network client yet. A
-cross-range transaction still only commits through whichever single process leads every
-range it touches (no server-side request forwarding), but that process is no longer left
-to chance: a real leadership-transfer primitive (`raft.Host.TransferLeadershipTo`, Raft's
-own `MsgTimeoutNow`) plus a self-correcting affinity policy now actively converges every
-co-located group's leadership onto the same, deterministically-preferred process, fixing
-the real, intermittent stable-split failure documented and previously only mitigated in
-`docs/bugs/003`. See
-`docs/correctness.md` for the complete, current list.
+- **Split.** Once `kv.ShouldSplit`/`ann.ShouldSplit` recommends one, `cmd/consensa` stands
+  up fresh child Raft groups on the shared transport, migrates data, and cuts traffic
+  over live (`kv.ExecuteLiveSplit` / `ann.ExecuteLiveSplitByRepair`, exercised end-to-end
+  by `TestConsensaBinaryExecutesALiveSplitAutomatically` and its vector-plane twin). The
+  trigger fires on size or QPS (`--split-qps-threshold`, off by default), so a small but
+  hot range can still split. The retired parent rejects every request instead of quietly
+  serving stale data (`MarkRetired`, `ErrRangeKeyMismatch`) — that closes the
+  silent-divergence risk, but it's not a zero-window guarantee across two processes'
+  independently cached routes.
+- **The vector split boundary is a lexicographic ID cut, not a clustering-aware one** —
+  measured at a 37.7% relative recall hit right after a split
+  (`docs/adr/011-vector-split-boundary.md`). Each child graph is rebuilt by one
+  replicated, deterministic repair of the parent's structure (drop cross-boundary edges,
+  backfill replacement neighbors) rather than reinserting every vector — recall lands
+  within 5% of a full rebuild, at one Raft entry per child instead of one per vector
+  (`docs/adr/012-replicated-incremental-repair.md`). A real clustering-aware boundary is
+  still unbuilt.
+- **Merge** (`docs/adr/014-live-range-merges.md`) reverses a split once both children go
+  cold: `--merge-threshold` and `--merge-qps-threshold` gate it, the right child freezes
+  through a Raft barrier, its data migrates into the left child's group, and it retires
+  the same way a split parent does. Two things worth knowing before you rely on it —
+  eligibility today only ever considers split-created sibling pairs, so the two original
+  static ranges can never merge with anything; a write racing the freeze barrier can
+  commit and then get silently discarded, which is the same "proposed isn't committed"
+  contract every caller here already has to handle with a read-until-visible retry, not
+  a new failure mode merge invented; and the migration itself isn't leadership-aware — it
+  runs on whichever process performed the split, using that process's own local handle to
+  the surviving range, so if Raft elects a different process to lead that range it just
+  keeps retrying and failing until the existing leadership-affinity policy converges
+  leadership back onto it, rather than failing over to whoever actually leads.
+- **Membership changes** go through joint consensus end to end, including provisioning a
+  genuinely new process over gRPC (`ConsensaAdmin.AddReplica`/`PromoteReplica`), and
+  `consensa-cli join` scripts the add-then-promote sequence for you — though it still
+  needs every replica's address by hand (no service discovery) and joins one range at a
+  time. Every RPC across all three services can require a bearer token
+  (`--auth-token`/`--admin-auth-token`, both off by default, scoped separately so a
+  leaked data-plane token can't drive membership changes — see `docs/notes/13-auth.md`).
+  There's no per-user identity, no token rotation, and no transport encryption on top of
+  that.
+- **Snapshot isolation** now read-refreshes instead of always aborting on a write-skew
+  push, proven on both the in-memory and Raft-replicated stores. The closed timestamp
+  advances and follower-read leases renew automatically on a running binary, but no RPC
+  surface exposes follower reads to a client yet. A cross-range transaction still commits
+  through a single process that leads every range it touches — there's no server-side
+  forwarding — but which process that is no longer a coin flip: a leadership-transfer
+  primitive plus a self-correcting affinity policy converges co-located groups onto the
+  same preferred leader, closing the intermittent failure in `docs/bugs/003`.
+
+See `docs/correctness.md` for the complete, current list.
 
 ## Verification
 

@@ -75,6 +75,6 @@ deserves its own focused implementation and test pass, not something to bolt on 
 unrelated change.
 
 **What ships now:** the measured evidence that the gap is real (this ADR), confirming the
-existing, honest wording in `docs/correctness.md` and `README.md`'s "what's not done yet"
+existing, honest wording in `docs/correctness.md` and `README.md`'s "known limits"
 section, which already state the recall dip as a known, unresolved limitation rather than
 implying it is fixed.

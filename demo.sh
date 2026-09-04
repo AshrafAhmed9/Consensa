@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # demo.sh -- one command, the whole project: brings up a real 3-node Consensa cluster
 # (three real OS processes), enforces auth on every RPC, drives real gRPC traffic against
-# it, triggers a real automatic live shard split under load, kills a node's process
-# mid-demo, and shows the cluster keeps working and recovers. Everything here is the real
-# binary and real network calls -- nothing is mocked or simulated for this script.
+# it, triggers a real automatic live shard split under load, watches the split siblings
+# merge back once they go cold, kills a node's process mid-demo, and shows the cluster
+# keeps working and recovers. Everything here is the real binary and real network calls
+# -- nothing is mocked or simulated for this script.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -31,13 +32,24 @@ PEERS="1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003"
 GRPC_ADDRS="127.0.0.1:8081,127.0.0.1:8082,127.0.0.1:8083"
 AUTH_TOKEN="demo-data-plane-secret"
 
-# A low threshold and a fast check interval so the live-split section below (which writes
-# only a few hundred vectors) actually crosses it inside this demo's own patience, instead
-# of needing the size a real deployment would use before splitting -- see --split-threshold
-# and --split-check-interval in cmd/consensa/main.go for what a real deployment would set
-# instead.
+# A low threshold and a fast check interval so the live-split section below crosses it
+# inside this demo's own patience, instead of needing the size a real deployment would
+# use before splitting -- see --split-threshold/--split-check-interval in
+# cmd/consensa/main.go for what a real deployment would set instead.
 SPLIT_THRESHOLD=20
 SPLIT_CHECK_INTERVAL=500ms
+
+# Merge is on from the start, but merge's own bookkeeping of which ranges were split
+# siblings lives only in this process's memory (rebuilt by watching a live split
+# complete, not read back from meta on restart) -- so it only ever fires within the same
+# continuous run that performed the split, and only once writes to those siblings
+# genuinely stop. That's why the bulk load below writes just enough past the split
+# threshold to trigger the split and then stops, instead of streaming hundreds more
+# vectors at it: leaving merge enabled while writes keep landing on a "cold" child races
+# its freeze barrier against those writes -- a real interaction (ADR-014's note on a
+# write racing the freeze barrier), not a demo bug to tune around.
+MERGE_THRESHOLD=1000
+MERGE_QPS_THRESHOLD=5
 
 section "starting 3 real node processes (real TCP Raft, real on-disk storage, auth-gated gRPC)"
 for id in 1 2 3; do
@@ -51,6 +63,7 @@ for id in 1 2 3; do
     -dimension 4 -tick-interval 20ms \
     -auth-token "$AUTH_TOKEN" \
     -split-threshold "$SPLIT_THRESHOLD" -split-check-interval "$SPLIT_CHECK_INTERVAL" \
+    -merge-threshold "$MERGE_THRESHOLD" -merge-qps-threshold "$MERGE_QPS_THRESHOLD" \
     > "$DATA_DIR/node$id.log" 2>&1 &
   PIDS+=($!)
   echo "  node $id: pid $! · raft :$raft_port · grpc :$grpc_port · metrics :$metrics_port"
@@ -77,7 +90,7 @@ section "committing a transaction across two independent Raft-replicated ranges"
 # same process ends up leading all three, but that alignment isn't guaranteed, and this
 # step can occasionally take a while (or not converge before this demo's own patience
 # runs out) if it doesn't. That's a real property of the current design worth seeing, not
-# something worth hiding behind a longer sleep -- see README.md's "what's not done yet".
+# something worth hiding behind a longer sleep -- see README.md's "known limits".
 if "$DATA_DIR/democlient" --addrs "$GRPC_ADDRS" --auth-token "$AUTH_TOKEN" --action txn --timeout 30s; then
   :
 else
@@ -86,7 +99,7 @@ fi
 
 section "triggering a real automatic live shard split under load"
 echo "  writing enough vectors to cross --split-threshold=$SPLIT_THRESHOLD..."
-"$DATA_DIR/democlient" --addrs "$GRPC_ADDRS" --auth-token "$AUTH_TOKEN" --action bulk-upsert --count 200 --timeout 30s
+"$DATA_DIR/democlient" --addrs "$GRPC_ADDRS" --auth-token "$AUTH_TOKEN" --action bulk-upsert --count 30 --timeout 30s
 echo "  waiting for the vector plane to notice, migrate data into two fresh child Raft"
 echo "  groups via a single replicated incremental-repair entry (not one insert per"
 echo "  vector -- see docs/adr/012-replicated-incremental-repair.md), and cut routing"
@@ -108,6 +121,32 @@ fi
 echo "  search still finds real data after the split (now served by a child range):"
 "$DATA_DIR/democlient" --addrs "$GRPC_ADDRS" --auth-token "$AUTH_TOKEN" --action search-only --timeout 10s
 
+section "the split siblings go cold and merge back automatically"
+echo "  no more writes land on them, so once --merge-qps-threshold's window sees it, the"
+echo "  right sibling freezes through a Raft barrier, its data folds into the left"
+echo "  sibling's group, and it retires the same way a split parent does"
+echo "  (see docs/adr/014-live-range-merges.md)..."
+# The retry loop below is unusually patient: merge's own migration only runs on the
+# process that performed the split, using that process's local handle to the surviving
+# child -- if Raft elects a different process to lead that child, every attempt fails and
+# retries until the existing leadership-affinity policy converges leadership back onto
+# it (see ADR-014's note on this). It's not a bug this demo papers over with a longer
+# sleep; it's a real, documented property worth seeing rather than hiding.
+merge_seen=""
+for _ in $(seq 1 90); do
+  if curl -s "http://127.0.0.1:9091/metrics" 2>/dev/null | grep -q '^consensa_range_merge_executed_total'; then
+    merge_seen="1"
+    break
+  fi
+  sleep 1
+done
+if [ -n "$merge_seen" ]; then
+  echo "  live merge executed -- the sibling pair is back to one authoritative range:"
+  curl -s "http://127.0.0.1:9091/metrics" | grep '^consensa_range_merge_executed_total' | sed 's/^/    /'
+else
+  echo "  (no merge observed within this demo's patience on this run -- continuing)"
+fi
+
 section "killing node 3's real process"
 kill "${PIDS[2]}"
 echo "  node 3 (pid ${PIDS[2]}) killed -- 2 of 3 replicas remain"
@@ -124,6 +163,7 @@ section "restarting node 3 -- it recovers from its own on-disk Raft log"
   -dimension 4 -tick-interval 20ms \
   -auth-token "$AUTH_TOKEN" \
   -split-threshold "$SPLIT_THRESHOLD" -split-check-interval "$SPLIT_CHECK_INTERVAL" \
+  -merge-threshold "$MERGE_THRESHOLD" -merge-qps-threshold "$MERGE_QPS_THRESHOLD" \
   > "$DATA_DIR/node3-restart.log" 2>&1 &
 PIDS[2]=$!
 echo "  node 3 restarted: pid ${PIDS[2]}"
@@ -135,7 +175,8 @@ curl -s "http://127.0.0.1:9091/metrics" | grep -E "^consensa_" || true
 
 echo
 echo "Done. This covered: auth, live traffic, cross-range transactions, an automatic live"
-echo "shard split, a process kill, and crash recovery -- not joint-consensus membership"
-echo "changes (consensa-cli join) or the chaos-testing harness, which need a scripted"
-echo "multi-minute run of their own; see cmd/consensa-cli and harness/torture."
+echo "shard split, an automatic live merge back, a process kill, and crash recovery --"
+echo "not joint-consensus membership changes (consensa-cli join) or the chaos-testing"
+echo "harness, which need a scripted multi-minute run of their own; see cmd/consensa-cli"
+echo "and harness/torture."
 echo "See README.md for the architecture diagram and docs/correctness.md for what's proven."
