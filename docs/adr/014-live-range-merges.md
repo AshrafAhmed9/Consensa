@@ -53,9 +53,29 @@ leading the left child, the migration keeps retrying and failing every tick, and
 merge only succeeds on whichever process happens to hold that leadership. Because the
 split and the merge attempt both run on whatever process led the *parent* range, and a
 freshly created child range elects its own leader independently, that process is not
-guaranteed to also lead the left child -- correctness is unaffected (a failed attempt is
-a no-op, not a partial write), but the merge can sit retrying for as long as it takes the
-existing leadership-affinity policy to converge the left child's leadership onto that
-same process, rather than completing as soon as both ranges go cold. Confirmed directly:
-running the merge demo showed exactly this pattern, the split's own process retrying and
-failing for tens of seconds while the other two processes never attempted it at all.
+guaranteed to also lead the left child. Confirmed directly: running the merge demo showed
+exactly this pattern, the split's own process retrying and failing for tens of seconds
+while the other two processes never attempted it at all -- correctness is unaffected (a
+failed attempt is a no-op, not a partial write), but liveness is not guaranteed on any
+particular schedule.
+
+`maintainChildKVLeadershipAffinity`/`maintainChildANNLeadershipAffinity`
+(`cmd/consensa/main.go`) extend the existing leadership-affinity policy (docs/bugs/003) to
+freshly split children, on the theory that the process which executed the split is, by
+construction, almost always the same one `maintainLeadershipAffinity` already converged
+the *original* groups onto before the split could run -- so pulling a child's leadership
+there too should let that process's own local merge attempt succeed. Testing this found
+the fix is a genuine improvement but not a complete one: `raft.Host.TransferLeadershipTo`
+can only be initiated by the *current* leader handing off to a named peer, so a process
+that does not already lead a given child has no lever to acquire it through this call --
+it can only give leadership away, never request it. When the split executor already
+leads the child (the common case, and the one three repeated runs of
+`TestConsensaBinaryExecutesALiveVectorSplitAutomatically` exercised cleanly end to end),
+this is a no-op improvement over the pre-fix behavior. When it does not -- observed
+directly in manual runs under concurrent load -- there is currently no mechanism that
+makes it acquire leadership short of the child's own natural re-election, which nothing
+here actively triggers. A complete fix needs every process, not just the split executor,
+to be able to discover and act on a live split's children (by reading them back from the
+descriptor catalog rather than from split-local, in-memory bookkeeping), so that whichever
+process actually leads the child is the one running the merge attempt. That is real,
+separately scoped follow-up work, not a corner cut in this session's fix.

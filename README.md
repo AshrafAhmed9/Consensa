@@ -153,11 +153,13 @@ specific limit of the current design, not a vague disclaimer.
   static ranges can never merge with anything; a write racing the freeze barrier can
   commit and then get silently discarded, which is the same "proposed isn't committed"
   contract every caller here already has to handle with a read-until-visible retry, not
-  a new failure mode merge invented; and the migration itself isn't leadership-aware — it
+  a new failure mode merge invented; and the migration isn't fully leadership-aware — it
   runs on whichever process performed the split, using that process's own local handle to
-  the surviving range, so if Raft elects a different process to lead that range it just
-  keeps retrying and failing until the existing leadership-affinity policy converges
-  leadership back onto it, rather than failing over to whoever actually leads.
+  the surviving range. A leadership-affinity extension pulls that range's leadership back
+  toward the split executor when it can, which covers the common case, but
+  `TransferLeadershipTo` can only be initiated by the current leader handing off, so a
+  process that never held that leadership has no way to request it — convergence isn't
+  guaranteed on any particular schedule (`docs/adr/014-live-range-merges.md`).
 - **Membership changes** go through joint consensus end to end, including provisioning a
   genuinely new process over gRPC (`ConsensaAdmin.AddReplica`/`PromoteReplica`), and
   `consensa-cli join` scripts the add-then-promote sequence for you — though it still

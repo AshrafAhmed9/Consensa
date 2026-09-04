@@ -122,6 +122,48 @@ func maintainLeadershipAffinity(selfID, preferredID raft.NodeID, node *ann.Durab
 	}
 }
 
+// maintainChildKVLeadershipAffinity extends maintainLeadershipAffinity's fix (docs/bugs/003)
+// to a live split's freshly created children, which elect independently of the original
+// groups and have no bias of their own toward preferredID. Without this,
+// executeKVMergeIfRecommended -- which only ever runs on the process whose own
+// splitCompleted bookkeeping holds the pair, see docs/adr/014-live-range-merges.md's note
+// on this -- proposes every migration write through whichever replica IT happens to hold
+// locally, and if that replica is not the child's actual leader, the migration fails and
+// retries forever rather than converging: preferredID is, by construction, almost always
+// that same process (maintainLeadershipAffinity already converges the ORIGINAL groups onto
+// it before a split can even execute, since execution itself only happens on whichever
+// process leads the parent), so pulling the child's leadership there too is what lets a
+// merge attempt made from that process's own local handle actually succeed.
+func maintainChildKVLeadershipAffinity(selfID, preferredID raft.NodeID, children [2]*kv.DurableRange) {
+	if selfID == preferredID {
+		return
+	}
+	for _, r := range children {
+		if r == nil {
+			continue
+		}
+		if role, _ := r.Status(); role == raft.Leader {
+			_ = r.TransferLeadershipTo(preferredID)
+		}
+	}
+}
+
+// maintainChildANNLeadershipAffinity is maintainChildKVLeadershipAffinity's vector-plane
+// counterpart -- same reasoning, see that function's doc comment.
+func maintainChildANNLeadershipAffinity(selfID, preferredID raft.NodeID, children [2]*ann.DurableNode) {
+	if selfID == preferredID {
+		return
+	}
+	for _, n := range children {
+		if n == nil {
+			continue
+		}
+		if _, _, isLeader := n.Status(); isLeader {
+			_ = n.TransferLeadershipTo(preferredID)
+		}
+	}
+}
+
 // splitCheckRange is the subset of kv.DurableRange checkSplitRecommendations needs.
 type splitCheckRange interface {
 	MaybeSplitKey(sizeThreshold int, qps, qpsThreshold float64) ([]byte, bool, error)
@@ -822,6 +864,7 @@ func main() {
 				executeSplitIfRecommended(1, leftRange, leftDescriptor, *splitThreshold, qps["1"], *splitQPSThreshold, newKVRange, meta, kvService, adminService, startTicking, metricRegistry.SplitExecuted, splitExecuted, splitInProgress, splitCompleted, &splitMu)
 				executeSplitIfRecommended(2, rightRange, rightDescriptor, *splitThreshold, qps["2"], *splitQPSThreshold, newKVRange, meta, kvService, adminService, startTicking, metricRegistry.SplitExecuted, splitExecuted, splitInProgress, splitCompleted, &splitMu)
 				for parentID, children := range splitCompleted {
+					maintainChildKVLeadershipAffinity(selfID, preferredLeader, children)
 					leftRate := tracker.rate(fmt.Sprintf("%d-left", parentID), children[0].RequestCount())
 					rightRate := tracker.rate(fmt.Sprintf("%d-right", parentID), children[1].RequestCount())
 					if !mergeSampled[parentID] {
@@ -921,6 +964,7 @@ func main() {
 				qps := tracker.rate("1", node.RequestCount())
 				executeAnnSplitIfRecommended(1, node, vectorDescriptor, *splitThreshold, qps, *splitQPSThreshold, newAnnChild, service.Meta(), service, startTickingAnn, metricRegistry.SplitExecuted, annSplitExecuted, annSplitInProgress, annSplitCompleted, &annSplitMu)
 				for parentID, children := range annSplitCompleted {
+					maintainChildANNLeadershipAffinity(selfID, preferredLeader, children)
 					leftRate := tracker.rate(fmt.Sprintf("%d-left", parentID), children[0].RequestCount())
 					rightRate := tracker.rate(fmt.Sprintf("%d-right", parentID), children[1].RequestCount())
 					if !annMergeSampled[parentID] {
