@@ -47,7 +47,7 @@ func TestConsensaBinaryExecutesALiveVectorSplitAutomatically(t *testing.T) {
 			// A low threshold and a fast check interval so this test doesn't need to
 			// upsert tens of thousands of vectors or wait the default 5s cadence to
 			// observe a real split within a reasonable test budget.
-			extraArgs: []string{"-split-threshold", "3", "-split-check-interval", "200ms"},
+			extraArgs: []string{"-split-threshold", "3", "-split-check-interval", "200ms", "-merge-threshold", "5", "-merge-qps-threshold", "100"},
 		}
 	}
 	for _, id := range ids {
@@ -78,6 +78,9 @@ func TestConsensaBinaryExecutesALiveVectorSplitAutomatically(t *testing.T) {
 		metricAddrs = append(metricAddrs, nodes[id].metricAddr)
 	}
 	annSplitExecutedForParent(t, metricAddrs, 1, 40*time.Second)
+	// A measured quiet window after the split must drive the full vector merge path before
+	// subsequent upserts prove the surviving left graph remains the live destination.
+	mergeExecutedForParent(t, metricAddrs, 1, 60*time.Second)
 
 	// New writes must keep succeeding, and be searchable, now that the vector plane's
 	// range 1 has been replaced by two fresh children (101/102) in every process's

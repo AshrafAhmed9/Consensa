@@ -90,6 +90,11 @@ type DurableRange struct {
 	// caller refresh, rather than accept a write only this now-obsolete replica will ever
 	// see.
 	retired atomic.Bool
+
+	// frozen is Raft-applied before a merge copies this range's data. The barrier makes
+	// the snapshot a prefix of the source group's committed history rather than an
+	// arbitrary concurrent engine scan.
+	frozen atomic.Bool
 }
 
 // MarkRetired permanently stops this replica from serving Put/Delete/Get, once and only
@@ -99,6 +104,23 @@ func (r *DurableRange) MarkRetired() { r.retired.Store(true) }
 
 // Retired reports whether MarkRetired has been called on this replica.
 func (r *DurableRange) Retired() bool { return r.retired.Load() }
+
+// Freeze proposes the merge barrier. Once committed, requests fail through the same
+// stale-route contract as retirement, so no acknowledged mutation can be omitted from
+// the source snapshot used by the surviving adjacent range.
+func (r *DurableRange) Freeze() error {
+	if r.retired.Load() || r.frozen.Load() {
+		return ErrRangeKeyMismatch
+	}
+	data, err := marshalRangeCommand(rangeCommand{Type: commandFreeze})
+	if err != nil {
+		return err
+	}
+	return r.host.Propose(data)
+}
+
+// Frozen reports whether this replica has applied the merge barrier.
+func (r *DurableRange) Frozen() bool { return r.frozen.Load() }
 
 // RequestCount returns the total number of Put/Delete/Get calls this replica has served
 // since it started -- see the requestCount field's own doc comment for why this is a raw
@@ -182,9 +204,18 @@ func (r *DurableRange) apply(entry raft.Entry) error {
 	}
 	ts := storage.HLC{WallTime: int64(entry.Index)}
 	switch command.Type {
+	case commandFreeze:
+		r.frozen.Store(true)
+		return nil
 	case commandPut:
+		if r.frozen.Load() {
+			return nil
+		}
 		return r.db.Put(command.Key, ts, command.Value)
 	case commandDelete:
+		if r.frozen.Load() {
+			return nil
+		}
 		return r.db.Delete(command.Key, ts)
 	case commandLease:
 		r.leaseMu.Lock()
@@ -242,7 +273,7 @@ func (r *DurableRange) AddPeerAddress(id raft.NodeID, address string) error {
 // comment for the client-retry pattern this requires.
 func (r *DurableRange) Put(key, value []byte) error {
 	r.requestCount.Add(1)
-	if r.retired.Load() {
+	if r.retired.Load() || r.frozen.Load() {
 		return ErrRangeKeyMismatch
 	}
 	if err := validateRangeKey(key); err != nil {
@@ -258,7 +289,7 @@ func (r *DurableRange) Put(key, value []byte) error {
 // Delete proposes a key removal. See Put for the leader contract.
 func (r *DurableRange) Delete(key []byte) error {
 	r.requestCount.Add(1)
-	if r.retired.Load() {
+	if r.retired.Load() || r.frozen.Load() {
 		return ErrRangeKeyMismatch
 	}
 	if err := validateRangeKey(key); err != nil {
@@ -282,7 +313,7 @@ func (r *DurableRange) Delete(key []byte) error {
 // the KV plane linearizable. A caller needing that guarantee wants ConsistentGet instead.
 func (r *DurableRange) Get(key []byte) ([]byte, error) {
 	r.requestCount.Add(1)
-	if r.retired.Load() {
+	if r.retired.Load() || r.frozen.Load() {
 		return nil, ErrRangeKeyMismatch
 	}
 	return r.db.Get(key, storage.HLC{WallTime: math.MaxInt64})

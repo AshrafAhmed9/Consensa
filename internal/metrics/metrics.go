@@ -10,6 +10,7 @@ type Registry struct {
 	Recall           prometheus.Gauge
 	SplitRecommended *prometheus.GaugeVec
 	SplitExecuted    *prometheus.CounterVec
+	MergeExecuted    *prometheus.CounterVec
 	RaftElections    prometheus.Counter
 	SearchLatency    prometheus.Histogram
 	TxnCommits       *prometheus.CounterVec
@@ -37,6 +38,10 @@ func NewRegistry() *Registry {
 		Name: "consensa_kv_split_executed_total",
 		Help: "Incremented once a live split of parent_range_id into left_range_id/right_range_id has actually completed.",
 	}, []string{"parent_range_id", "left_range_id", "right_range_id"})
+	mergeExecuted := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "consensa_range_merge_executed_total",
+		Help: "Incremented once a cold sibling range has been absorbed and routing cut over.",
+	}, []string{"parent_range_id", "surviving_range_id", "absorbed_range_id", "plane"})
 	// Incremented once, in cmd/consensa's own Raft tick loop, each time this node's local
 	// view of leadership (ann.DurableNode.Status's isLeader) transitions from false to
 	// true -- a real election win, not just a term bump (a term can advance without this
@@ -64,7 +69,7 @@ func NewRegistry() *Registry {
 		Name: "consensa_txn_commits_total",
 		Help: "Transactions committed via txn.Coordinator.Commit, by outcome.",
 	}, []string{"outcome"})
-	r.MustRegister(term, qps, recall, splitRecommended, splitExecuted, elections, searchLatency, txnCommits)
+	r.MustRegister(term, qps, recall, splitRecommended, splitExecuted, mergeExecuted, elections, searchLatency, txnCommits)
 	return &Registry{
 		Registry:         r,
 		RaftTerm:         term,
@@ -72,6 +77,7 @@ func NewRegistry() *Registry {
 		Recall:           recall,
 		SplitRecommended: splitRecommended,
 		SplitExecuted:    splitExecuted,
+		MergeExecuted:    mergeExecuted,
 		RaftElections:    elections,
 		SearchLatency:    searchLatency,
 		TxnCommits:       txnCommits,

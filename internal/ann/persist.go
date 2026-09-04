@@ -31,6 +31,15 @@ func EncodeDeleteMutation(id string) ([]byte, error) {
 	return json.Marshal(Mutation{Operation: "delete", ID: id})
 }
 
+// EncodeFreezeMutation records the merge barrier in the source graph's Raft history.
+func EncodeFreezeMutation() ([]byte, error) { return json.Marshal(Mutation{Operation: "freeze"}) }
+
+// IsFreezeMutation identifies the barrier before ApplyMutation changes graph state.
+func IsFreezeMutation(data []byte) bool {
+	var m Mutation
+	return json.Unmarshal(data, &m) == nil && m.Operation == "freeze"
+}
+
 // EncodeRepairMutation serializes a "restore then repair" operation: the payload a fresh
 // child range's leader proposes exactly once during a split, carrying the PARENT's own
 // graph bytes (not just the vectors that belong to this child) so every replica can
@@ -70,6 +79,8 @@ func (h *HNSW) ApplyMutation(data []byte) error {
 		}
 		start, end := m.Start, m.End
 		h.Repair(func(id string) bool { return id >= start && (end == "" || id < end) })
+		return nil
+	case "freeze":
 		return nil
 	default:
 		return errors.New("ann: unknown graph mutation")

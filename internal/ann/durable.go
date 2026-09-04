@@ -39,6 +39,10 @@ type DurableNode struct {
 	// forever as a silently-diverging duplicate of data the rest of the system now
 	// considers owned elsewhere.
 	retired atomic.Bool
+
+	// frozen is the committed source-side merge barrier. A graph snapshot is only safe
+	// after this state has applied, because it then follows every accepted source mutation.
+	frozen atomic.Bool
 }
 
 // RequestCount returns the total number of Insert/Delete/Search/GetVector calls this
@@ -52,6 +56,21 @@ func (d *DurableNode) MarkRetired() { d.retired.Store(true) }
 
 // Retired reports whether MarkRetired has been called on this replica.
 func (d *DurableNode) Retired() bool { return d.retired.Load() }
+
+// Freeze proposes the Raft barrier before this range is absorbed by its left neighbour.
+func (d *DurableNode) Freeze() error {
+	if d.retired.Load() || d.frozen.Load() {
+		return ErrRangeKeyMismatch
+	}
+	data, err := EncodeFreezeMutation()
+	if err != nil {
+		return err
+	}
+	return d.host.Propose(data)
+}
+
+// Frozen reports whether this replica applied the merge barrier.
+func (d *DurableNode) Frozen() bool { return d.frozen.Load() }
 
 // DurableNodeConfig names everything one replica needs: its own storage directory (reused
 // verbatim across a restart), the fixed Raft group membership, its own listen address, and
@@ -114,6 +133,13 @@ func NewDurableNode(cfg DurableNodeConfig) (*DurableNode, error) {
 func (d *DurableNode) apply(entry raft.Entry) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if IsFreezeMutation(entry.Data) {
+		d.frozen.Store(true)
+		return nil
+	}
+	if d.frozen.Load() {
+		return nil
+	}
 	if err := d.index.ApplyMutation(entry.Data); err != nil {
 		return err
 	}
@@ -149,7 +175,7 @@ func (d *DurableNode) ProposeConfChange(voters, learners []raft.NodeID) error {
 // proposeToLeader does.
 func (d *DurableNode) Insert(id string, v vector.Vector) error {
 	d.requestCount.Add(1)
-	if d.retired.Load() {
+	if d.retired.Load() || d.frozen.Load() {
 		return ErrRangeKeyMismatch
 	}
 	data, err := EncodeMutation(id, v)
@@ -162,7 +188,7 @@ func (d *DurableNode) Insert(id string, v vector.Vector) error {
 // Delete proposes a deterministic deletion mutation. See Insert for the leader contract.
 func (d *DurableNode) Delete(id string) error {
 	d.requestCount.Add(1)
-	if d.retired.Load() {
+	if d.retired.Load() || d.frozen.Load() {
 		return ErrRangeKeyMismatch
 	}
 	data, err := EncodeDeleteMutation(id)
@@ -177,7 +203,7 @@ func (d *DurableNode) Delete(id string) error {
 // determinism guarantee), so any replica -- not only the leader -- may safely serve reads.
 func (d *DurableNode) Search(query vector.Vector, k, ef int) ([]Result, error) {
 	d.requestCount.Add(1)
-	if d.retired.Load() {
+	if d.retired.Load() || d.frozen.Load() {
 		return nil, ErrRangeKeyMismatch
 	}
 	d.mu.RLock()

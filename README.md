@@ -124,6 +124,14 @@ including the ones later sessions overturned.
 
 ## What's not done yet
 
+Cold ranges created as sibling children by an automatic split now merge automatically on
+both planes once `--merge-threshold` and `--merge-qps-threshold` are enabled and both
+children remain below those floors for a measured QPS window. The right child commits a
+freeze barrier, folds into the left child’s existing Raft group, is retired, and is then
+removed from routing through `Meta.Replace`; a stale route receives the same retryable
+range-mismatch error used after splits. This proves same-placement sibling consolidation,
+not immediate metadata convergence across processes or a merge that first moves replicas.
+
 Stated plainly rather than left implied: `cmd/consensa` now automatically executes a live
 split on both planes -- standing up fresh child Raft groups at runtime on the same shared
 transport, migrating data, and cutting real traffic over -- once each plane's own

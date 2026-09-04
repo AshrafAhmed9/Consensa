@@ -45,6 +45,22 @@ func splitExecutedForParent(t *testing.T, metricAddrs []string, parentID int, de
 	t.Fatalf("no %s{...%s...} series appeared on any of %v within %s -- live split never executed", name, label, metricAddrs, deadline)
 }
 
+// mergeExecutedForParent waits for the completion signal emitted only after source
+// freezing, data migration, retirement, and metadata replacement all succeeded.
+func mergeExecutedForParent(t *testing.T, metricAddrs []string, parentID int, deadline time.Duration) {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
+		for _, addr := range metricAddrs {
+			if metricLineExists(t, addr, "consensa_range_merge_executed_total", fmt.Sprintf(`parent_range_id="%d"`, parentID)) {
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("no merge completion metric for parent %d within %s", parentID, deadline)
+}
+
 func metricLineExists(t *testing.T, metricAddr, name, label string) bool {
 	t.Helper()
 	resp, err := http.Get(fmt.Sprintf("http://%s/metrics", metricAddr))
@@ -100,7 +116,7 @@ func TestConsensaBinaryExecutesALiveSplitAutomatically(t *testing.T) {
 			// A low threshold and a fast check interval so this test doesn't need to
 			// write tens of thousands of keys or wait the default 5s cadence to observe
 			// a real split within a reasonable test budget.
-			extraArgs: []string{"-split-threshold", "3", "-split-check-interval", "200ms"},
+			extraArgs: []string{"-split-threshold", "3", "-split-check-interval", "200ms", "-merge-threshold", "4", "-merge-qps-threshold", "100"},
 		}
 	}
 	for _, id := range ids {
@@ -130,6 +146,9 @@ func TestConsensaBinaryExecutesALiveSplitAutomatically(t *testing.T) {
 		metricAddrs = append(metricAddrs, nodes[id].metricAddr)
 	}
 	splitExecutedForParent(t, metricAddrs, 1, 30*time.Second)
+	// The quiet window after migration must consolidate the two new siblings before this
+	// test sends more traffic; otherwise this only proves splitting, not Phase 12's merge.
+	mergeExecutedForParent(t, metricAddrs, 1, 60*time.Second)
 
 	// New writes spanning both sides of the original "m" boundary must keep succeeding
 	// now that range 1 has been replaced by two fresh children in every process's

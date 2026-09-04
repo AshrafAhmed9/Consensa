@@ -78,6 +78,31 @@ func TestDurableRangeRejectsAllOperationsOnceRetired(t *testing.T) {
 	}
 }
 
+// TestDurableRangeFreezeRejectsSourceTraffic proves a merge barrier turns the absorbed
+// source into the same retryable refusal state before its snapshot is copied, preventing
+// a client from successfully targeting data that is about to leave this Raft group.
+func TestDurableRangeFreezeRejectsSourceTraffic(t *testing.T) {
+	live := newDurableRangeGroupForSplit(t, 909)
+	stop := make(chan struct{})
+	wg := driveRanges(live, 10*time.Millisecond, stop)
+	defer func() { close(stop); wg.Wait() }()
+	leader := waitForLeader(t, live, 10*time.Second)
+	deadline := time.Now().Add(10 * time.Second)
+	for !leader.Frozen() && time.Now().Before(deadline) {
+		_ = leader.Freeze()
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !leader.Frozen() {
+		t.Fatal("freeze barrier never applied")
+	}
+	if err := leader.Put([]byte("after"), []byte("freeze")); !errors.Is(err, ErrRangeKeyMismatch) {
+		t.Fatalf("Put after freeze = %v, want range mismatch", err)
+	}
+	if _, err := leader.Get([]byte("after")); !errors.Is(err, ErrRangeKeyMismatch) {
+		t.Fatalf("Get after freeze = %v, want range mismatch", err)
+	}
+}
+
 // This file is DurableRange's counterpart to internal/ann/durable_test.go: it proves a
 // killed-and-restarted range replica recovers its key/value data, and specifically proves
 // it via storage.Engine's own WAL/SSTable recovery -- not via replaying the Raft log

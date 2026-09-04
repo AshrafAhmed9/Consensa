@@ -274,3 +274,21 @@ edges must be repaired before child graphs serve approximate search independentl
 
 The reciprocal merge primitive accepts only adjacent spans with identical replicas. A live
 merge still needs a coordinated Raft barrier before it can publish that descriptor change.
+
+**Update: cold split siblings now merge automatically on both planes.** The running
+binary retains each completed split's two child groups as a merge candidate, but never
+considers the operator-configured static KV ranges. `--merge-threshold` and
+`--merge-qps-threshold` must both be enabled; `kv.ShouldMerge`/`ann.ShouldMerge` require
+the combined size and both per-range rates to be below their floors. The first sample is
+discarded so a newly-created child is not mistaken for idle merely because no rate window
+exists yet. The absorbed right child commits a freeze barrier, its applied state is
+re-proposed into the left child's existing Raft group, then it is retired before
+`Meta.Replace` expands the left descriptor. `TestExecuteLiveMergeConsolidatesTwoRealRaftGroups`
+proves the KV copy against two real groups; the focused merge tests prove descriptor and
+trigger invariants on both planes.
+
+This does not claim atomic metadata propagation between processes: a cached route can
+still reach the retired right child briefly, where it gets the established mismatch and
+must refresh. It also deliberately does not implement a placement-changing merge; split
+siblings already inherit identical replicas, while a general merge must complete replica
+movement first.

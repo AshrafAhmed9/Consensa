@@ -150,6 +150,16 @@ pieces it covers.
 
 ## Later update: sharding, transactions, membership changes, and the read-path ladder
 
+**Cold split siblings now consolidate automatically.** Both planes retain completed split
+siblings as candidates, require their combined count and both measured per-replica QPS
+values to be below configured merge floors, freeze the absorbed right source through
+Raft, copy its applied data into the existing left Raft group, retire right, and replace
+the two descriptors atomically with left's expanded span. `TestExecuteLiveMergeConsolidatesTwoRealRaftGroups`
+proves real KV-group consolidation; unit tests on both planes prove the trigger and
+descriptor invariants. This is not proof of instantaneous metadata convergence between
+processes or of merging differently placed replica sets; stale routes fail through the
+existing refresh contract, and placement-changing merges still require membership movement.
+
 Everything below was closed in later sessions, after the account above was written. Each
 item names its own test and the doc where the full account (including what it deliberately
 does *not* prove) lives — this section is a current index, not a replacement for those.

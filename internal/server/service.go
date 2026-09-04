@@ -108,11 +108,14 @@ func (s *Service) indexFor(id string) (Index, error) {
 // fan-out -- a query vector carries no ID to route by, so every range that could hold a
 // relevant neighbor must be searched and the results merged.
 func (s *Service) allIndices() []Index {
+	descriptors := s.meta.All()
 	s.indicesMu.RLock()
 	defer s.indicesMu.RUnlock()
-	out := make([]Index, 0, len(s.indices))
-	for _, index := range s.indices {
-		out = append(out, index)
+	out := make([]Index, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		if index, ok := s.indices[descriptor.ID]; ok {
+			out = append(out, index)
+		}
 	}
 	return out
 }

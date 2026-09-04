@@ -164,6 +164,7 @@ const (
 	commandDelete          commandType = "delete"
 	commandLease           commandType = "lease"
 	commandClosedTimestamp commandType = "closed_timestamp"
+	commandFreeze          commandType = "freeze"
 )
 
 // rangeCommand's lease fields carry a Lease grant (see lease.go) through the same
@@ -216,7 +217,7 @@ func (s *rangeState) apply(data []byte) error {
 		s.values[string(command.Key)] = bytes.Clone(command.Value)
 	case commandDelete:
 		delete(s.values, string(command.Key))
-	case commandLease, commandClosedTimestamp:
+	case commandLease, commandClosedTimestamp, commandFreeze:
 		// This in-memory harness models Put/Delete convergence only; lease and
 		// closed-timestamp state are tracked by DurableRange (see durable_range.go),
 		// the real replicated implementation these tests don't exercise.
@@ -244,7 +245,7 @@ func decodeRangeCommand(data []byte) (rangeCommand, bool, error) {
 	// A lease grant or closed-timestamp advance carries no Key -- each authorizes/promises
 	// something over the whole range, not one entry -- so the empty-key rejection below
 	// only applies to Put/Delete.
-	if command.Type != commandLease && command.Type != commandClosedTimestamp && len(command.Key) == 0 {
+	if command.Type != commandLease && command.Type != commandClosedTimestamp && command.Type != commandFreeze && len(command.Key) == 0 {
 		return rangeCommand{}, false, errors.New("kv: command has empty key")
 	}
 	return command, true, nil

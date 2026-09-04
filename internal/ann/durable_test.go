@@ -126,6 +126,30 @@ func TestDurableNodeRejectsAllOperationsOnceRetired(t *testing.T) {
 	}
 }
 
+// TestDurableNodeFreezeRejectsSourceTraffic proves the vector merge barrier rejects an
+// absorbed source before its graph can be copied into the surviving sibling group.
+func TestDurableNodeFreezeRejectsSourceTraffic(t *testing.T) {
+	_, live := newDurableGroupForSplit(t, 909, Config{Dimension: 2, M: 4, EFConstruction: 8, EFSearch: 8, Seed: 1})
+	stop := make(chan struct{})
+	wg := driveDurable(live, 10*time.Millisecond, stop)
+	defer func() { close(stop); wg.Wait() }()
+	leader := waitForAnnLeader(t, live, 10*time.Second)
+	deadline := time.Now().Add(10 * time.Second)
+	for !leader.Frozen() && time.Now().Before(deadline) {
+		_ = leader.Freeze()
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !leader.Frozen() {
+		t.Fatal("freeze barrier never applied")
+	}
+	if err := leader.Insert("after", vector.Vector{1, 2}); !errors.Is(err, ErrRangeKeyMismatch) {
+		t.Fatalf("Insert after freeze = %v, want range mismatch", err)
+	}
+	if _, err := leader.Search(vector.Vector{1, 2}, 1, 4); !errors.Is(err, ErrRangeKeyMismatch) {
+		t.Fatalf("Search after freeze = %v, want range mismatch", err)
+	}
+}
+
 // TestDurableNodeSurvivesRestart is the headline scenario: three real Raft replicas over
 // real TCP each with their own on-disk storage; insert vectors; kill one node's process
 // (Close both its transport and its storage engine); restart a fresh DurableNode against
@@ -207,7 +231,7 @@ func TestDurableNodeSurvivesRestart(t *testing.T) {
 		ID: 3, GroupPeers: ids, ListenAddress: addrs[3],
 		TransportPeers: map[raft.NodeID]string{1: addrs[1], 2: addrs[2]},
 		StorageDir:     dirs[3], Index: cfg,
-		ElectionTick:   60, HeartbeatTick: 6,
+		ElectionTick: 60, HeartbeatTick: 6,
 	})
 	if err != nil {
 		t.Fatalf("restarting node 3: %v", err)

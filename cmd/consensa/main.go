@@ -247,7 +247,7 @@ func executeSplitIfRecommended(
 	newChild func(rangeID uint64) *kv.DurableRange,
 	meta *kv.Meta, kvService *server.KVService, adminService *server.AdminService,
 	startTicking func(*kv.DurableRange), splitExecutedCounter *prometheus.CounterVec,
-	executed map[uint64]bool, inProgress map[uint64][2]*kv.DurableRange, mu *sync.Mutex,
+	executed map[uint64]bool, inProgress, completed map[uint64][2]*kv.DurableRange, mu *sync.Mutex,
 ) {
 	mu.Lock()
 	alreadyDone := executed[parentID]
@@ -327,6 +327,7 @@ func executeSplitIfRecommended(
 
 	mu.Lock()
 	executed[parentID] = true
+	completed[parentID] = children
 	delete(inProgress, parentID)
 	mu.Unlock()
 	splitExecutedCounter.WithLabelValues(fmt.Sprint(parentID), fmt.Sprint(leftID), fmt.Sprint(rightID)).Inc()
@@ -365,7 +366,7 @@ func executeAnnSplitIfRecommended(
 	newChild func(rangeID uint64) *ann.DurableNode,
 	meta *ann.Meta, service *server.Service,
 	startTicking func(*ann.DurableNode), splitExecutedCounter *prometheus.CounterVec,
-	executed map[uint64]bool, inProgress map[uint64][2]*ann.DurableNode, mu *sync.Mutex,
+	executed map[uint64]bool, inProgress, completed map[uint64][2]*ann.DurableNode, mu *sync.Mutex,
 ) {
 	mu.Lock()
 	alreadyDone := executed[parentID]
@@ -427,10 +428,122 @@ func executeAnnSplitIfRecommended(
 
 	mu.Lock()
 	executed[parentID] = true
+	completed[parentID] = children
 	delete(inProgress, parentID)
 	mu.Unlock()
 	splitExecutedCounter.WithLabelValues(fmt.Sprint(parentID), fmt.Sprint(leftID), fmt.Sprint(rightID)).Inc()
 	slog.Info("live split executed", "plane", "vector", "range_id", parentID, "left_range_id", leftID, "right_range_id", rightID, "split_key", splitKey)
+}
+
+// executeKVMergeIfRecommended preserves the left group and retires only right after its
+// Raft barrier is visible. That order prevents metadata from ever naming a span whose
+// source snapshot could still admit a write.
+func executeKVMergeIfRecommended(parentID uint64, children [2]*kv.DurableRange, sizeFloor int, leftQPS, rightQPS, qpsFloor float64, meta *kv.Meta, executed *prometheus.CounterVec) bool {
+	if sizeFloor <= 0 || qpsFloor <= 0 || children[0] == nil || children[1] == nil || children[1].Retired() {
+		return false
+	}
+	left, right := children[0], children[1]
+	leftData, err := left.AllKeys()
+	if err != nil {
+		return false
+	}
+	rightData, err := right.AllKeys()
+	if err != nil {
+		return false
+	}
+	if !kv.ShouldMerge(kv.MergeTrigger{SizeFloor: sizeFloor, LeftQPS: leftQPS, RightQPS: rightQPS, QPSFloor: qpsFloor}, leftData, rightData) {
+		return false
+	}
+	if !right.Frozen() {
+		_ = right.Freeze()
+		return false
+	}
+	leftID, rightID := parentID*10+1, parentID*10+2
+	var leftDesc, rightDesc kv.Descriptor
+	for _, d := range meta.All() {
+		if d.ID == leftID {
+			leftDesc = d
+		}
+		if d.ID == rightID {
+			rightDesc = d
+		}
+	}
+	if leftDesc.ID == 0 || rightDesc.ID == 0 {
+		return false
+	}
+	merged, err := kv.ExecuteLiveMerge(leftDesc, rightDesc, rightData, left, 5*time.Second)
+	if err != nil {
+		slog.Error("live merge: migration failed, will retry", "range_id", parentID, "error", err)
+		return false
+	}
+	right.MarkRetired()
+	next := meta.All()
+	filtered := next[:0]
+	for _, d := range next {
+		if d.ID != leftID && d.ID != rightID {
+			filtered = append(filtered, d)
+		}
+	}
+	filtered = append(filtered, merged)
+	if err := meta.Replace(filtered); err != nil {
+		slog.Error("live merge: publishing metadata", "range_id", parentID, "error", err)
+		return false
+	}
+	slog.Info("live merge executed", "parent_range_id", parentID, "surviving_range_id", leftID, "absorbed_range_id", rightID)
+	executed.WithLabelValues(fmt.Sprint(parentID), fmt.Sprint(leftID), fmt.Sprint(rightID), "kv").Inc()
+	return true
+}
+
+// executeANNMergeIfRecommended is the vector-plane counterpart: its only safe cutover
+// order is barrier, copy, retire, then replace, so a query never keeps an absorbed graph
+// in the active descriptor catalog after its source is no longer authoritative.
+func executeANNMergeIfRecommended(parentID uint64, children [2]*ann.DurableNode, sizeFloor int, leftQPS, rightQPS, qpsFloor float64, meta *ann.Meta, executed *prometheus.CounterVec) bool {
+	if sizeFloor <= 0 || qpsFloor <= 0 || children[0] == nil || children[1] == nil || children[1].Retired() {
+		return false
+	}
+	left, right := children[0], children[1]
+	leftData, rightData := left.AllVectors(), right.AllVectors()
+	if !ann.ShouldMerge(ann.MergeTrigger{SizeFloor: sizeFloor, LeftQPS: leftQPS, RightQPS: rightQPS, QPSFloor: qpsFloor}, leftData, rightData) {
+		return false
+	}
+	if !right.Frozen() {
+		_ = right.Freeze()
+		return false
+	}
+	leftID, rightID := parentID*100+1, parentID*100+2
+	var leftDesc, rightDesc ann.Descriptor
+	for _, d := range meta.All() {
+		if d.ID == leftID {
+			leftDesc = d
+		}
+		if d.ID == rightID {
+			rightDesc = d
+		}
+	}
+	if leftDesc.ID == 0 || rightDesc.ID == 0 {
+		return false
+	}
+	merged, err := ann.ExecuteLiveMerge(leftDesc, rightDesc, rightData, left, 5*time.Second)
+	if err != nil {
+		slog.Error("live merge: migration failed, will retry", "plane", "vector", "range_id", parentID, "error", err)
+		return false
+	}
+	right.MarkRetired()
+	next := meta.All()
+	filtered := next[:0]
+	for _, d := range next {
+		if d.ID != leftID && d.ID != rightID {
+			filtered = append(filtered, d)
+		}
+	}
+	filtered = append(filtered, merged)
+	if err := meta.Replace(filtered); err != nil {
+		slog.Error("live merge: publishing metadata", "plane", "vector", "range_id", parentID, "error", err)
+		return false
+	}
+	slog.Info("live merge executed", "plane", "vector", "parent_range_id", parentID, "surviving_range_id", leftID, "absorbed_range_id", rightID)
+	executed.WithLabelValues(fmt.Sprint(parentID), fmt.Sprint(leftID), fmt.Sprint(rightID), "ann").Inc()
+	return true
 }
 
 func main() {
@@ -453,6 +566,8 @@ func main() {
 	splitCheckInterval := flag.Duration("split-check-interval", 5*time.Second, "how often each KV range's key count is checked against --split-threshold (see kv.ShouldSplit) -- decision only, does not execute a split")
 	splitThreshold := flag.Int("split-threshold", 100000, "key count above which a range is reported as recommending a split (consensa_kv_split_recommended); 0 disables the size trigger entirely")
 	splitQPSThreshold := flag.Float64("split-qps-threshold", 0, "requests/sec above which a range is reported as recommending a split, independent of key count -- catches a range that is small but genuinely hot under a skewed access pattern; 0 (the default) disables this trigger, matching this project's previous size-only behavior")
+	mergeThreshold := flag.Int("merge-threshold", 0, "combined key/vector count at or below which split siblings are eligible to merge; 0 disables automatic merging")
+	mergeQPSThreshold := flag.Float64("merge-qps-threshold", 0, "requests/sec at or below which both split siblings are eligible to merge; 0 disables automatic merging")
 	leaseDuration := flag.Duration("lease-duration", 6*time.Second, "how long an automatically granted follower-read lease is valid for once committed")
 	leaseRenewBefore := flag.Duration("lease-renew-before", 3*time.Second, "renew a range's lease once less than this much validity remains, so a valid lease exists continuously rather than lapsing between grants")
 	authToken := flag.String("auth-token", "", "shared-secret bearer token Consensa/ConsensaKV calls must present (internal/auth); empty disables data-plane auth, matching this project's previous unauthenticated behavior")
@@ -688,6 +803,8 @@ func main() {
 	// on the main Raft tick loop above.
 	splitExecuted := map[uint64]bool{}
 	splitInProgress := map[uint64][2]*kv.DurableRange{}
+	splitCompleted := map[uint64][2]*kv.DurableRange{}
+	mergeSampled := map[uint64]bool{}
 	var splitMu sync.Mutex
 	stopSplitCheck := make(chan struct{})
 	go func() {
@@ -702,8 +819,20 @@ func main() {
 			case <-ticker.C:
 				qps := map[string]float64{"1": tracker.rate("1", leftRange.RequestCount()), "2": tracker.rate("2", rightRange.RequestCount())}
 				checkSplitRecommendations(*splitThreshold, *splitQPSThreshold, qps, metricRegistry.SplitRecommended, ranges)
-				executeSplitIfRecommended(1, leftRange, leftDescriptor, *splitThreshold, qps["1"], *splitQPSThreshold, newKVRange, meta, kvService, adminService, startTicking, metricRegistry.SplitExecuted, splitExecuted, splitInProgress, &splitMu)
-				executeSplitIfRecommended(2, rightRange, rightDescriptor, *splitThreshold, qps["2"], *splitQPSThreshold, newKVRange, meta, kvService, adminService, startTicking, metricRegistry.SplitExecuted, splitExecuted, splitInProgress, &splitMu)
+				executeSplitIfRecommended(1, leftRange, leftDescriptor, *splitThreshold, qps["1"], *splitQPSThreshold, newKVRange, meta, kvService, adminService, startTicking, metricRegistry.SplitExecuted, splitExecuted, splitInProgress, splitCompleted, &splitMu)
+				executeSplitIfRecommended(2, rightRange, rightDescriptor, *splitThreshold, qps["2"], *splitQPSThreshold, newKVRange, meta, kvService, adminService, startTicking, metricRegistry.SplitExecuted, splitExecuted, splitInProgress, splitCompleted, &splitMu)
+				for parentID, children := range splitCompleted {
+					leftRate := tracker.rate(fmt.Sprintf("%d-left", parentID), children[0].RequestCount())
+					rightRate := tracker.rate(fmt.Sprintf("%d-right", parentID), children[1].RequestCount())
+					if !mergeSampled[parentID] {
+						mergeSampled[parentID] = true
+						continue
+					}
+					if executeKVMergeIfRecommended(parentID, children, *mergeThreshold, leftRate, rightRate, *mergeQPSThreshold, meta, metricRegistry.MergeExecuted) {
+						delete(splitCompleted, parentID)
+						delete(mergeSampled, parentID)
+					}
+				}
 			}
 		}
 	}()
@@ -776,6 +905,8 @@ func main() {
 	vectorDescriptor := ann.Descriptor{ID: 1, Start: "", End: "", Replicas: groupPeers}
 	annSplitExecuted := map[uint64]bool{}
 	annSplitInProgress := map[uint64][2]*ann.DurableNode{}
+	annSplitCompleted := map[uint64][2]*ann.DurableNode{}
+	annMergeSampled := map[uint64]bool{}
 	var annSplitMu sync.Mutex
 	stopAnnSplitCheck := make(chan struct{})
 	go func() {
@@ -788,7 +919,19 @@ func main() {
 				return
 			case <-ticker.C:
 				qps := tracker.rate("1", node.RequestCount())
-				executeAnnSplitIfRecommended(1, node, vectorDescriptor, *splitThreshold, qps, *splitQPSThreshold, newAnnChild, service.Meta(), service, startTickingAnn, metricRegistry.SplitExecuted, annSplitExecuted, annSplitInProgress, &annSplitMu)
+				executeAnnSplitIfRecommended(1, node, vectorDescriptor, *splitThreshold, qps, *splitQPSThreshold, newAnnChild, service.Meta(), service, startTickingAnn, metricRegistry.SplitExecuted, annSplitExecuted, annSplitInProgress, annSplitCompleted, &annSplitMu)
+				for parentID, children := range annSplitCompleted {
+					leftRate := tracker.rate(fmt.Sprintf("%d-left", parentID), children[0].RequestCount())
+					rightRate := tracker.rate(fmt.Sprintf("%d-right", parentID), children[1].RequestCount())
+					if !annMergeSampled[parentID] {
+						annMergeSampled[parentID] = true
+						continue
+					}
+					if executeANNMergeIfRecommended(parentID, children, *mergeThreshold, leftRate, rightRate, *mergeQPSThreshold, service.Meta(), metricRegistry.MergeExecuted) {
+						delete(annSplitCompleted, parentID)
+						delete(annMergeSampled, parentID)
+					}
+				}
 			}
 		}
 	}()
