@@ -44,17 +44,30 @@ func TestParseLearners(t *testing.T) {
 	}
 }
 
+// usedPorts tracks every port freePort has handed out in this test binary run. Closing a
+// listener only releases the port back to the kernel, which can hand the very same ephemeral
+// port to the next Listen("127.0.0.1:0") call before this test gets around to using it -- e.g.
+// giving one node's metrics address the same port as its own raft address. Retrying on a
+// port we've already claimed closes that window.
+var usedPorts = map[int]bool{}
+
 func freePort(t *testing.T) int {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve port: %v", err)
+	for {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve port: %v", err)
+		}
+		port := listener.Addr().(*net.TCPAddr).Port
+		if err := listener.Close(); err != nil {
+			t.Fatalf("release port: %v", err)
+		}
+		if usedPorts[port] {
+			continue
+		}
+		usedPorts[port] = true
+		return port
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	if err := listener.Close(); err != nil {
-		t.Fatalf("release port: %v", err)
-	}
-	return port
 }
 
 type e2eNode struct {
