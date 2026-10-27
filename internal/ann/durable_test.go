@@ -11,11 +11,8 @@ import (
 	"github.com/ashraf/consensa/internal/vector"
 )
 
-// This file proves the actual claim in the project's README: a node can be killed and
-// restarted and recovers its vector index from disk, not just from its peers. Nothing else
-// in the repository tests this -- ReplicatedIndex is explicitly in-memory only (see its
-// doc comment), so DurableNode (internal/ann/durable.go) and this test are what make
-// "durable distributed vector store" a demonstrated fact rather than an aspiration.
+// This file checks that a node can be stopped and restarted and get its vector index back
+// from its own disk, without help from its peers.
 
 const durableTestDim = 4
 
@@ -85,12 +82,10 @@ func waitForApplied(t *testing.T, n *DurableNode, want int, deadline time.Durati
 	t.Fatalf("replica applied %d mutations, want at least %d within %s", n.AppliedCount(), want, deadline)
 }
 
-// TestDurableNodeSurvivesRestart is the headline scenario: three real Raft replicas over
-// real TCP each with their own on-disk storage; insert vectors; kill one node's process
-// (Close both its transport and its storage engine); restart a fresh DurableNode against
-// the SAME storage directory with no peers ticking yet; and confirm it can already answer
-// a correct nearest-neighbour search purely from its own recovered log -- before it has
-// exchanged a single further message with the cluster.
+// TestDurableNodeSurvivesRestart starts three replicas over real TCP, each with its own
+// directory, and inserts vectors. It then stops every node, restarts node 3 alone on its
+// old directory (no peers are running), and checks it can answer a nearest-neighbour
+// search using only what it recovered from its own log.
 func TestDurableNodeSurvivesRestart(t *testing.T) {
 	ids := []raft.NodeID{1, 2, 3}
 	addrs := map[raft.NodeID]string{1: freeAddr(t), 2: freeAddr(t), 3: freeAddr(t)}
@@ -142,26 +137,18 @@ func TestDurableNodeSurvivesRestart(t *testing.T) {
 		}
 	}
 
-	// Kill node 3 the way a real crash would: close its transport and its storage engine,
-	// then stop driving it. Nodes 1 and 2 keep running underneath the closed stop channel
-	// scope below -- we only stop node 3's own ticking by removing it and restarting the
-	// shared driver without it.
+	// Stop all nodes. Closing node 3 closes its transport and its storage, like a crash.
 	close(stop)
 	wg.Wait()
 	if err := nodes[3].Close(); err != nil {
 		t.Fatalf("closing node 3: %v", err)
 	}
 
-	// Restart node 3 from the SAME storage directory, with peers 1 and 2 named but never
-	// actually reachable during this test (they were stopped above and are not restarted).
-	// A Host does not flush its recovered-but-unapplied entries at construction -- Ready()
-	// is only inspected when something drives the node (Tick/Step/Propose), matching the
-	// "no protocol decisions outside Step/Tick" contract in host.go's doc comment -- so one
-	// local Tick() is required to surface the replay. That Tick is purely local computation
-	// (Ready() derived from state RecoverNode already restored from disk); the internal/raft
-	// host.go fix earlier in this session (a send failure must not block Apply) is what
-	// makes this Tick succeed in applying the backlog even though peers 1 and 2 are
-	// unreachable. If the search below is correct, recovery came entirely from disk.
+	// Restart node 3 on the same directory. Peers 1 and 2 are named but not running.
+	// Recovered entries are only applied when the node is driven, so one local Tick below
+	// triggers the replay. A failed send to an unreachable peer must not block that
+	// (see driveLocked in raft/host.go). If the search is then correct, the data came
+	// entirely from node 3's own disk.
 	restarted, err := NewDurableNode(DurableNodeConfig{
 		ID: 3, GroupPeers: ids, ListenAddress: addrs[3],
 		TransportPeers: map[raft.NodeID]string{1: addrs[1], 2: addrs[2]},

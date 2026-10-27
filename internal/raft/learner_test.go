@@ -17,13 +17,8 @@ func newLearnerGroup(t *testing.T) map[NodeID]Node {
 	return ns
 }
 
-// TestLearnerNeverBecomesLeader proves a learner ticking well past its own election
-// timeout, with no leader ever contacting it, still never starts an election -- the
-// property that makes it safe to add as a learner at all: adding a brand-new, empty
-// replica as a full voter immediately would let it participate in electing a leader with
-// no log, and a network partition isolating a learner from everyone else must not turn
-// into it trying (uselessly, since no real voter would count its request, but wastefully
-// and against the whole point of "not a voter yet") to become leader.
+// TestLearnerNeverBecomesLeader proves a learner never starts an election, however long
+// it goes without hearing from a leader.
 func TestLearnerNeverBecomesLeader(t *testing.T) {
 	ns := newLearnerGroup(t)
 	learner := ns[4]
@@ -40,11 +35,8 @@ func TestLearnerNeverBecomesLeader(t *testing.T) {
 	}
 }
 
-// TestLearnerCannotGrantAVote proves handlePreVote/handleVote's defense-in-depth reject
-// actually rejects, even though startPreVote/startElection never message a learner in the
-// first place -- this closes the same class of gap TestFigure8UnsafeCommitWouldBeOverwritten
-// closes for the commit rule: prove the invariant holds even under a message the normal
-// protocol path would never generate, not just that the normal path behaves.
+// TestLearnerCannotGrantAVote proves a learner rejects vote requests. Real nodes never
+// send it one, so this sends one by hand.
 func TestLearnerCannotGrantAVote(t *testing.T) {
 	ns := newLearnerGroup(t)
 	learner := ns[4]
@@ -66,13 +58,9 @@ func TestLearnerCannotGrantAVote(t *testing.T) {
 	}
 }
 
-// TestCommitNeverAdvancesOnLearnerAcksAlone proves the actual safety property learners
-// exist to preserve: an entry the leader plus ONLY the learner have acknowledged must
-// NOT be reported committed, even though that is a literal majority of all 4 nodes
-// (leader + learner = 2 of 4). Only a majority of the 3 real VOTERS (quorum = 2) may
-// commit anything -- if this were wrong, a leader could report a write durable while only
-// one real voter besides itself has it, which a subsequent election among the other two
-// real voters could silently overwrite.
+// TestCommitNeverAdvancesOnLearnerAcksAlone proves an entry held only by the leader and a
+// learner is not committed. That is 2 of 4 nodes, but only a majority of the 3 voters
+// counts. Otherwise a write could be reported as safe while only one other voter has it.
 func TestCommitNeverAdvancesOnLearnerAcksAlone(t *testing.T) {
 	ns := newLearnerGroup(t)
 	for i := 0; i < 3; i++ {
@@ -147,10 +135,8 @@ func TestCommitNeverAdvancesOnLearnerAcksAlone(t *testing.T) {
 	}
 }
 
-// TestLearnerReceivesReplicatedLog proves a learner is not just excluded from quorum
-// math but genuinely still catches up on the real log through ordinary replication --
-// the whole point of adding it as a learner first rather than not replicating to it at
-// all, so it can be promoted to a voter later without a separate catch-up mechanism.
+// TestLearnerReceivesReplicatedLog proves a learner still receives the log, so it can
+// catch up and later be promoted to a voter.
 func TestLearnerReceivesReplicatedLog(t *testing.T) {
 	ns := newLearnerGroup(t)
 	for i := 0; i < 3; i++ {

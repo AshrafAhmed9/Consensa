@@ -2,23 +2,22 @@ package raft
 
 import "errors"
 
-// Cluster is a deterministic in-memory assembly of one Raft group. It is a test/runtime
-// harness, not a network transport: callers explicitly Tick and Deliver, so all scheduling
-// decisions remain observable and replayable.
+// Cluster is a whole Raft group running in one process, with messages passed by direct
+// function calls instead of a network. Nothing runs by itself: the caller calls Tick and
+// Deliver, so a test run is repeatable. Tests and the torture tool use it to inject faults.
 type Cluster struct {
 	nodes   map[NodeID]Node
 	applied map[NodeID][][]byte
 }
 
-// NewCluster creates identical replicas for a fixed voter set.
+// NewCluster creates one node per ID, all voters.
 func NewCluster(ids []NodeID) (*Cluster, error) {
 	if len(ids) == 0 {
 		return nil, errors.New("raft: empty cluster")
 	}
 	c := &Cluster{nodes: map[NodeID]Node{}, applied: map[NodeID][][]byte{}}
 	for position, id := range ids {
-		// Staggered logical timeouts are the deterministic analogue of Raft's randomized
-		// election timers: they prevent perpetual simultaneous candidacies in this harness.
+		// Each node gets a slightly different election timeout so they don't all campaign at once.
 		n, err := NewNode(Config{ID: id, Peers: ids, ElectionTick: 3 + position, HeartbeatTick: 1})
 		if err != nil {
 			return nil, err
@@ -28,7 +27,7 @@ func NewCluster(ids []NodeID) (*Cluster, error) {
 	return c, nil
 }
 
-// Tick advances every replica one logical tick then delivers all resulting RPCs to quiescence.
+// Tick advances every node by one tick, then delivers messages until nothing is left to send.
 func (c *Cluster) Tick() error {
 	for _, n := range c.nodes {
 		n.Tick()
@@ -36,15 +35,13 @@ func (c *Cluster) Tick() error {
 	return c.Deliver()
 }
 
-// Deliver executes queued Ready cycles until no replica emits another message. It models a
-// reliable fully-connected network; the simulator provides fault injection around this loop.
+// Deliver passes messages between nodes until none are left, as on a perfect network.
 func (c *Cluster) Deliver() error {
 	return c.DeliverFiltered(func(Message) bool { return true })
 }
 
-// DeliverFiltered runs a delivery cycle while predicate decides which messages cross the
-// simulated network. Returning false drops a message permanently, which models partitions
-// without adding goroutines or wall-clock timing to the protocol.
+// DeliverFiltered is Deliver, but deliver decides which messages get through. A message
+// it rejects is dropped for good, which is how tests model a network partition.
 func (c *Cluster) DeliverFiltered(deliver func(Message) bool) error {
 	for progress := true; progress; {
 		progress = false
@@ -74,7 +71,7 @@ func (c *Cluster) DeliverFiltered(deliver func(Message) bool) error {
 	return nil
 }
 
-// Propose submits through a specified leader and delivers the result across the group.
+// Propose submits data through the given leader and delivers the resulting messages.
 func (c *Cluster) Propose(leader NodeID, data []byte) error {
 	n := c.nodes[leader]
 	if n == nil {
@@ -86,11 +83,7 @@ func (c *Cluster) Propose(leader NodeID, data []byte) error {
 	return c.Deliver()
 }
 
-// TickFiltered advances every replica one logical tick, then delivers using deliver instead
-// of Tick's always-connected delivery. This is what an external fault-injection driver (see
-// cmd/torture) needs and could not otherwise get: Tick alone can only ever model a fully
-// reliable network from outside this package, since c.nodes is unexported and Deliver's
-// predicate defaults to "always true."
+// TickFiltered is Tick with a message filter (see DeliverFiltered).
 func (c *Cluster) TickFiltered(deliver func(Message) bool) error {
 	for _, n := range c.nodes {
 		n.Tick()
@@ -98,9 +91,7 @@ func (c *Cluster) TickFiltered(deliver func(Message) bool) error {
 	return c.DeliverFiltered(deliver)
 }
 
-// ProposeFiltered submits through a specified leader and delivers using deliver instead of
-// Propose's always-connected delivery, so an external driver can test what happens to a
-// proposal issued during a partition or into an isolated leader.
+// ProposeFiltered is Propose with a message filter (see DeliverFiltered).
 func (c *Cluster) ProposeFiltered(leader NodeID, data []byte, deliver func(Message) bool) error {
 	n := c.nodes[leader]
 	if n == nil {
@@ -112,15 +103,11 @@ func (c *Cluster) ProposeFiltered(leader NodeID, data []byte, deliver func(Messa
 	return c.DeliverFiltered(deliver)
 }
 
-// Leader returns the current elected leader, if the group has completed an election.
+// Leader returns the node that is currently leader.
 //
-// More than one node can believe itself Leader at once -- a node isolated by a partition
-// keeps its stale role and term until it reconnects and hears a higher term, which is
-// exactly the "zombie leader" scenario Raft's safety properties tolerate rather than
-// prevent. Breaking the tie by highest term (rather than by c.nodes' undefined map
-// iteration order, which the previous version did) picks the node a real client would
-// actually observe as current: the isolated node's term cannot exceed a live quorum's,
-// so this can never surface the stale side once a real replacement has been elected.
+// After a partition, an isolated old leader can still think it is leader. If several
+// nodes claim leadership, the one with the highest term is the real one, because the
+// isolated node's term cannot pass the majority's.
 func (c *Cluster) Leader() (NodeID, bool) {
 	var (
 		leader     NodeID
@@ -139,16 +126,7 @@ func (c *Cluster) Leader() (NodeID, bool) {
 	return leader, found
 }
 
-// Status reports the elected leader and its term for administrative surfaces.
-func (c *Cluster) Status() (NodeID, uint64, bool) {
-	leader, ok := c.Leader()
-	if !ok {
-		return 0, 0, false
-	}
-	return leader, c.nodes[leader].(*node).term, true
-}
-
-// Applied returns a copy of commands applied by one replica.
+// Applied returns the commands a node has applied, in order.
 func (c *Cluster) Applied(id NodeID) [][]byte {
 	out := make([][]byte, len(c.applied[id]))
 	for i, v := range c.applied[id] {

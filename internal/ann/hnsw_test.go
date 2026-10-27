@@ -22,21 +22,26 @@ func TestHNSWFindsNearest(t *testing.T) {
 	}
 }
 
-// TestRepairDropsCrossBoundaryNodes proves a child index cannot retain an edge to a parent key.
-func TestRepairDropsCrossBoundaryNodes(t *testing.T) {
+// TestDeleteRemovesNodeAndLinks proves a deleted vector is gone and no other node still links to it.
+func TestDeleteRemovesNodeAndLinks(t *testing.T) {
 	h, _ := NewHNSW(Config{Dimension: 2, M: 4, EFConstruction: 8, EFSearch: 8, Seed: 1})
 	_ = h.Insert("a", vector.Vector{0, 0})
 	_ = h.Insert("z", vector.Vector{2, 2})
-	h.Repair(func(id string) bool { return id == "a" })
+	if err := h.Delete("z"); err != nil {
+		t.Fatal(err)
+	}
 	if len(h.nodes) != 1 {
-		t.Fatalf("nodes after repair = %d", len(h.nodes))
+		t.Fatalf("nodes after delete = %d", len(h.nodes))
 	}
 	for _, ids := range h.nodes["a"].neighbors {
 		for _, id := range ids {
 			if id == "z" {
-				t.Fatal("cross-boundary edge survived")
+				t.Fatal("link to deleted node survived")
 			}
 		}
+	}
+	if err := h.Delete("z"); err == nil {
+		t.Fatal("deleting a missing ID should fail")
 	}
 }
 

@@ -2,41 +2,61 @@ package ann
 
 import (
 	"errors"
-	"github.com/ashraf/consensa/internal/vector"
 	"math"
 	"math/rand/v2"
 	"sort"
+
+	"github.com/ashraf/consensa/internal/vector"
 )
 
-// Config controls HNSW graph density and search breadth.
+// HNSW (Hierarchical Navigable Small World) is a graph for approximate nearest-neighbour
+// search. Every vector is a node. Each node links to a few nearby nodes, and some nodes
+// also exist on higher "levels" that have fewer nodes and longer jumps.
+//
+// To search, start at the top level and repeatedly move to whichever neighbour is closest
+// to the query. Drop down a level when no neighbour is closer. On the bottom level,
+// explore more widely to collect the best candidates. This checks far fewer vectors than
+// comparing against all of them.
+//
+// This type is not safe for concurrent use, and it is deterministic: the same inserts in
+// the same order with the same Seed always build the same graph. That is what lets every
+// Raft replica end up with an identical graph.
+
+// Config sets the shape of the graph.
+//   - Dimension: length of every vector.
+//   - M: how many neighbours each node keeps per level.
+//   - EFConstruction: how many candidates are considered when inserting a vector.
+//   - EFSearch: how many candidates are considered when searching (the default for Search).
+//   - Seed: seeds the random choice of node levels.
 type Config struct {
 	Dimension, M, EFConstruction, EFSearch int
 	Seed                                   uint64
 }
 
-// Result is one approximate neighbour ordered by increasing L2 distance.
+// Result is one search hit. Distance is squared L2 distance, so smaller means closer.
 type Result struct {
 	ID       string
 	Distance float32
 }
+
+// node is one vector in the graph.
 type node struct {
 	id        string
 	v         vector.Vector
-	level     int
-	neighbors map[int][]string
+	level     int              // the highest level this node appears on
+	neighbors map[int][]string // neighbour IDs on each level
 }
 
-// HNSW is a single-writer proximity graph. Deterministic level generation and sorting by
-// ID break distance ties identically on every replica, which makes Raft mutation logging viable.
+// HNSW is the graph.
 type HNSW struct {
 	cfg      Config
 	rng      *rand.Rand
 	nodes    map[string]*node
-	entry    string
-	maxLevel int
+	entry    string // node where every search starts (it has the highest level)
+	maxLevel int    // the entry node's level, or -1 when the graph is empty
 }
 
-// NewHNSW validates immutable index parameters.
+// NewHNSW creates an empty graph.
 func NewHNSW(c Config) (*HNSW, error) {
 	if c.Dimension <= 0 || c.M <= 0 || c.EFConstruction < c.M || c.EFSearch <= 0 {
 		return nil, errors.New("ann: invalid HNSW config")
@@ -44,9 +64,11 @@ func NewHNSW(c Config) (*HNSW, error) {
 	return &HNSW{cfg: c, rng: rand.New(rand.NewPCG(c.Seed, c.Seed^0x9e3779b97f4a7c15)), nodes: map[string]*node{}, maxLevel: -1}, nil
 }
 
-// Validate checks whether a vector can be admitted without mutating the graph.
+// Validate checks that a vector has the right length and no NaN/infinite values.
 func (h *HNSW) Validate(v vector.Vector) error { return v.ValidateDimension(h.cfg.Dimension) }
 
+// level picks a random level for a new node. Higher levels are exponentially rarer,
+// so the upper levels stay small.
 func (h *HNSW) level() int {
 	u := h.rng.Float64()
 	if u == 0 {
@@ -55,14 +77,14 @@ func (h *HNSW) level() int {
 	return int(-math.Log(u) / math.Log(float64(h.cfg.M)))
 }
 
-// Insert adds or replaces an embedding. Equal inputs and insertion order produce equal graph
-// mutations; callers must serialize insertions through Raft before invoking it on replicas.
+// Insert adds a vector, replacing any existing vector with the same ID.
 //
-// A re-insert of an already-present ID removes the old node first (via Delete's own
-// Repair-based cleanup) rather than erroring: Apply (persist.go's ApplyMutation, called
-// from raft.Host.driveLocked while holding the host's own mutex) must never fail for an
-// entry that already achieved consensus: a state machine that rejects a committed entry
-// would replay and fail on it forever.
+// A replace must never fail: Raft has already committed the insert, and a failing
+// state machine would fail on it again after every restart.
+//
+// To place the new node, it finds its closest existing nodes on each level (by checking
+// every node, which is exact but slow for large graphs), picks a diverse subset of
+// them as neighbours, and links them both ways.
 func (h *HNSW) Insert(id string, v vector.Vector) error {
 	if id == "" {
 		return errors.New("ann: empty ID")
@@ -82,16 +104,12 @@ func (h *HNSW) Insert(id string, v vector.Vector) error {
 		h.maxLevel = n.level
 		return nil
 	}
-	// Publish before reciprocal-link trimming so distance comparisons can resolve this ID.
+	// Add the node first: the distance code below looks nodes up by ID.
 	h.nodes[id] = n
 	for l := min(n.level, h.maxLevel); l >= 0; l-- {
-		candidates := h.closestExcept(v, l, h.cfg.EFConstruction, id)
-		selected := h.selectDiverse(v, candidates, h.cfg.M)
-		for _, other := range selected {
-			n.neighbors[l] = append(n.neighbors[l], other.ID)
-			o := h.nodes[other.ID]
-			o.neighbors[l] = append(o.neighbors[l], id)
-			h.trim(o, l)
+		candidates := h.closest(v, l, h.cfg.EFConstruction, map[string]bool{id: true})
+		for _, other := range h.selectDiverse(v, candidates, h.cfg.M) {
+			h.link(n, h.nodes[other.ID], l)
 		}
 	}
 	if n.level > h.maxLevel {
@@ -100,6 +118,16 @@ func (h *HNSW) Insert(id string, v vector.Vector) error {
 	}
 	return nil
 }
+
+// link connects a and b on level l in both directions. The other node's list is cut back
+// to its M closest if it grew too long.
+func (h *HNSW) link(a, b *node, l int) {
+	a.neighbors[l] = append(a.neighbors[l], b.id)
+	b.neighbors[l] = append(b.neighbors[l], a.id)
+	h.trim(b, l)
+}
+
+// trim keeps only the M closest neighbours of n on level l.
 func (h *HNSW) trim(n *node, l int) {
 	rs := make([]Result, 0, len(n.neighbors[l]))
 	for _, id := range n.neighbors[l] {
@@ -115,7 +143,9 @@ func (h *HNSW) trim(n *node, l int) {
 	}
 }
 
-// Search returns up to k approximate neighbours. EF controls the breadth/latency trade-off.
+// Search returns up to k approximate nearest neighbours of q, closest first. ef is how
+// many candidates to track on the bottom level: bigger is slower but finds more of the
+// true nearest neighbours. If ef is 0 the configured EFSearch is used.
 func (h *HNSW) Search(q vector.Vector, k, ef int) ([]Result, error) {
 	if err := q.ValidateDimension(h.cfg.Dimension); err != nil {
 		return nil, err
@@ -129,6 +159,7 @@ func (h *HNSW) Search(q vector.Vector, k, ef int) ([]Result, error) {
 	if len(h.nodes) == 0 {
 		return nil, nil
 	}
+	// Walk down from the top level, moving to the closest node found on each level.
 	entry := h.entry
 	for level := h.maxLevel; level > 0; level-- {
 		candidates := h.searchLayer(q, entry, level, 1)
@@ -136,6 +167,7 @@ func (h *HNSW) Search(q vector.Vector, k, ef int) ([]Result, error) {
 			entry = candidates[0].ID
 		}
 	}
+	// On the bottom level, search more widely.
 	rs := h.searchLayer(q, entry, 0, ef)
 	if len(rs) > k {
 		rs = rs[:k]
@@ -143,16 +175,17 @@ func (h *HNSW) Search(q vector.Vector, k, ef int) ([]Result, error) {
 	return rs, nil
 }
 
-// searchLayer is HNSW's bounded best-first graph walk. The frontier is always expanded
-// nearest-first; once its best candidate is worse than the current ef worst result, no
-// remaining path can improve the bounded result set at this layer.
+// searchLayer walks one level of the graph starting at entry and returns the ef closest
+// nodes it found, closest first. It always expands the closest unexplored candidate, and
+// stops once that candidate is farther than the worst of the ef results, because
+// anything reached through it could only be worse.
 func (h *HNSW) searchLayer(q vector.Vector, entry string, level, ef int) []Result {
 	start, ok := h.nodes[entry]
 	if !ok {
 		return nil
 	}
-	frontier := []Result{{ID: entry, Distance: vector.L2Squared(q, start.v)}}
-	best := append([]Result(nil), frontier...)
+	frontier := []Result{{ID: entry, Distance: vector.L2Squared(q, start.v)}} // still to explore
+	best := append([]Result(nil), frontier...)                                // best found so far
 	visited := map[string]bool{entry: true}
 	for len(frontier) > 0 {
 		sortResults(frontier)
@@ -186,95 +219,75 @@ func (h *HNSW) searchLayer(q vector.Vector, entry string, level, ef int) []Resul
 	return best
 }
 
-// Repair removes nodes and cross-boundary edges rejected by keep, then re-trims affected
-// neighbour lists. Range splitting calls this on each child graph so it never traverses an
-// edge into a keyspace it no longer owns.
-func (h *HNSW) Repair(keep func(id string) bool) {
-	for id := range h.nodes {
-		if !keep(id) {
-			delete(h.nodes, id)
-		}
+// Delete removes a vector from the graph.
+//
+// Removing a node leaves its former neighbours with a missing link, so after dropping the
+// links to it, every node that now has fewer than M neighbours on a level looks for new
+// ones. Nodes are visited in sorted ID order and ties are broken by ID, so every replica
+// repairs the graph in exactly the same way.
+func (h *HNSW) Delete(id string) error {
+	if _, ok := h.nodes[id]; !ok {
+		return errors.New("ann: ID not found")
 	}
+	delete(h.nodes, id)
 	for _, n := range h.nodes {
 		for level, ids := range n.neighbors {
-			filtered := ids[:0]
-			for _, id := range ids {
-				if _, ok := h.nodes[id]; ok {
-					filtered = append(filtered, id)
+			kept := ids[:0]
+			for _, neighborID := range ids {
+				if neighborID != id {
+					kept = append(kept, neighborID)
 				}
 			}
-			n.neighbors[level] = filtered
+			n.neighbors[level] = kept
 			h.trim(n, level)
 		}
 	}
-	// Backfill: dropping cross-boundary neighbors above leaves nodes near the old boundary
-	// under-connected, which measurably hurts recall more than a full rebuild would (a
-	// rebuilt child gives every node a fresh, full-M neighbor list; a merely-pruned one
-	// does not) -- so this pass re-runs neighbor selection on the affected nodes, which the filter/trim
-	// pass above does not do on its own: it can only ever shrink a neighbor list, never search for replacements. Iterate
-	// nodes in sorted ID order (not map order) for the same cross-replica determinism
-	// reason as the entry re-pick below.
-	sortedIDs := make([]string, 0, len(h.nodes))
-	for id := range h.nodes {
-		sortedIDs = append(sortedIDs, id)
-	}
-	sort.Strings(sortedIDs)
-	for _, id := range sortedIDs {
-		n := h.nodes[id]
+	sortedIDs := h.sortedIDs()
+	for _, nodeID := range sortedIDs {
+		n := h.nodes[nodeID]
 		for level := 0; level <= n.level; level++ {
 			need := h.cfg.M - len(n.neighbors[level])
 			if need <= 0 {
 				continue
 			}
-			exclude := map[string]bool{n.id: true}
+			skip := map[string]bool{n.id: true}
 			for _, existing := range n.neighbors[level] {
-				exclude[existing] = true
+				skip[existing] = true
 			}
-			candidates := h.closestNotIn(n.v, level, h.cfg.EFConstruction, exclude)
+			candidates := h.closest(n.v, level, h.cfg.EFConstruction, skip)
 			for _, other := range h.selectDiverse(n.v, candidates, need) {
-				n.neighbors[level] = append(n.neighbors[level], other.ID)
-				o := h.nodes[other.ID]
-				o.neighbors[level] = append(o.neighbors[level], id)
-				h.trim(o, level)
+				h.link(n, h.nodes[other.ID], level)
 			}
 		}
 	}
-	if _, ok := h.nodes[h.entry]; !ok {
+	if h.entry == id {
+		// The entry node was deleted: pick the node with the highest level (lowest ID on ties).
 		h.entry, h.maxLevel = "", -1
-		// Iterate in a fixed order (not Go's randomized map order) and break ties on the
-		// lowest ID: Repair must be a pure function of (graph, keep) so every replica of a
-		// live Raft group that applies the identical repair independently (persist.go's
-		// "repair" mutation) computes a bit-identical entry point. Two nodes tied for
-		// maxLevel are common after a split prunes half the graph, and map iteration order
-		// differs per process/run, so this was a real latent nondeterminism before any
-		// caller actually needed cross-replica determinism from Repair.
-		ids := make([]string, 0, len(h.nodes))
-		for id := range h.nodes {
-			ids = append(ids, id)
-		}
-		sort.Strings(ids)
-		for _, id := range ids {
-			if n := h.nodes[id]; n.level > h.maxLevel {
-				h.entry, h.maxLevel = id, n.level
+		for _, nodeID := range sortedIDs {
+			if n := h.nodes[nodeID]; n.level > h.maxLevel {
+				h.entry, h.maxLevel = nodeID, n.level
 			}
 		}
 	}
-}
-
-// Delete removes a vector and all reciprocal links to it. A replicated caller must log
-// this mutation before applying it, just as it does insertion, so replicas remove the same
-// graph topology in the same order.
-func (h *HNSW) Delete(id string) error {
-	if _, ok := h.nodes[id]; !ok {
-		return errors.New("ann: ID not found")
-	}
-	h.Repair(func(candidate string) bool { return candidate != id })
 	return nil
 }
-func (h *HNSW) closestExcept(q vector.Vector, l, limit int, exclude string) []Result {
+
+// sortedIDs returns every node ID in sorted order.
+func (h *HNSW) sortedIDs() []string {
+	ids := make([]string, 0, len(h.nodes))
+	for id := range h.nodes {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// closest returns up to limit nodes closest to q that exist on level l or higher,
+// leaving out the IDs in skip. It compares against every node.
+func (h *HNSW) closest(q vector.Vector, l, limit int, skip map[string]bool) []Result {
 	rs := make([]Result, 0)
 	for id, n := range h.nodes {
-		if id != exclude && n.level >= l {
+		if !skip[id] && n.level >= l {
 			rs = append(rs, Result{ID: id, Distance: vector.L2Squared(q, n.v)})
 		}
 	}
@@ -285,25 +298,9 @@ func (h *HNSW) closestExcept(q vector.Vector, l, limit int, exclude string) []Re
 	return rs
 }
 
-// closestNotIn is closestExcept's multi-ID counterpart, used by Repair's backfill pass to
-// search for replacement neighbors while skipping a node's own already-kept ones (not just
-// itself).
-func (h *HNSW) closestNotIn(q vector.Vector, l, limit int, exclude map[string]bool) []Result {
-	rs := make([]Result, 0)
-	for id, n := range h.nodes {
-		if !exclude[id] && n.level >= l {
-			rs = append(rs, Result{ID: id, Distance: vector.L2Squared(q, n.v)})
-		}
-	}
-	sortResults(rs)
-	if len(rs) > limit {
-		rs = rs[:limit]
-	}
-	return rs
-}
-
-// selectDiverse implements HNSW's diversity criterion: a candidate is accepted only when
-// it is nearer to the new node than to already-selected neighbours, retaining long links.
+// selectDiverse picks up to m neighbours from candidates (closest first). A candidate is
+// skipped if it is closer to an already-picked neighbour than to q. That spreads the
+// links in different directions instead of clumping them, which keeps long jumps.
 func (h *HNSW) selectDiverse(q vector.Vector, candidates []Result, m int) []Result {
 	out := make([]Result, 0, m)
 	for _, c := range candidates {
@@ -323,6 +320,8 @@ func (h *HNSW) selectDiverse(q vector.Vector, candidates []Result, m int) []Resu
 	}
 	return out
 }
+
+// sortResults orders results closest first, breaking ties by ID.
 func sortResults(rs []Result) {
 	sort.Slice(rs, func(i, j int) bool {
 		if rs[i].Distance == rs[j].Distance {
@@ -331,6 +330,7 @@ func sortResults(rs []Result) {
 		return rs[i].Distance < rs[j].Distance
 	})
 }
+
 func min(a, b int) int {
 	if a < b {
 		return a

@@ -2,51 +2,31 @@ package vector
 
 import "math"
 
-// L2Squared returns squared Euclidean distance. Skipping sqrt cannot alter nearest-neighbour
-// ordering and keeps the hottest future search operation as cheap as the scalar baseline allows.
-// Precondition: a and b have equal lengths.
+// L2Squared returns the squared Euclidean distance between a and b. The square root is
+// skipped because it never changes which vector is nearer, and this runs for every
+// comparison during a search. If the lengths differ the result is NaN.
 func L2Squared(a, b []float32) float32 {
-	return accumulate(a, b, func(x, y float32) float32 { d := x - y; return d * d })
-}
-
-// InnerProduct returns the dot product. Precondition: a and b have equal lengths.
-func InnerProduct(a, b []float32) float32 {
-	return accumulate(a, b, func(x, y float32) float32 { return x * y })
-}
-
-// CosineDistance returns 1-cosine similarity. Zero vectors have no direction, so this returns
-// NaN rather than pretending they are near or far; callers must reject or handle them explicitly.
-// Precondition: a and b have equal lengths.
-func CosineDistance(a, b []float32) float32 {
 	if len(a) != len(b) {
 		return float32(math.NaN())
 	}
-	var dot, aa, bb float32
-	for i := range a {
-		dot += a[i] * b[i]
-		aa += a[i] * a[i]
-		bb += b[i] * b[i]
-	}
-	if aa == 0 || bb == 0 {
-		return float32(math.NaN())
-	}
-	return 1 - dot/float32(math.Sqrt(float64(aa*bb)))
-}
-
-func accumulate(a, b []float32, f func(float32, float32) float32) float32 {
-	if len(a) != len(b) {
-		return float32(math.NaN())
-	}
-	// Reslicing states the loop's eight-element invariant to the compiler, letting it
-	// eliminate repeated bounds checks without hiding the scalar algorithm in assembly.
-	n := len(a) &^ 7
+	// The main loop handles eight components per step, which lets the compiler skip
+	// most bounds checks and runs noticeably faster than one component at a time.
+	n := len(a) &^ 7 // length rounded down to a multiple of 8
 	a8, b8 := a[:n], b[:n]
 	var sum float32
 	for i := 0; i < n; i += 8 {
-		sum += f(a8[i], b8[i]) + f(a8[i+1], b8[i+1]) + f(a8[i+2], b8[i+2]) + f(a8[i+3], b8[i+3]) + f(a8[i+4], b8[i+4]) + f(a8[i+5], b8[i+5]) + f(a8[i+6], b8[i+6]) + f(a8[i+7], b8[i+7])
+		sum += sq(a8[i], b8[i]) + sq(a8[i+1], b8[i+1]) + sq(a8[i+2], b8[i+2]) + sq(a8[i+3], b8[i+3]) +
+			sq(a8[i+4], b8[i+4]) + sq(a8[i+5], b8[i+5]) + sq(a8[i+6], b8[i+6]) + sq(a8[i+7], b8[i+7])
 	}
+	// Handle the last few components, if the length is not a multiple of 8.
 	for i := n; i < len(a); i++ {
-		sum += f(a[i], b[i])
+		sum += sq(a[i], b[i])
 	}
 	return sum
+}
+
+// sq returns the square of the difference x-y.
+func sq(x, y float32) float32 {
+	d := x - y
+	return d * d
 }

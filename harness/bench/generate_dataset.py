@@ -1,12 +1,9 @@
-"""Generates a deterministic synthetic vector dataset for the ANN recall benchmark.
+"""Generates a synthetic vector dataset for the recall benchmark. The same seed always
+gives the same data.
 
-This is SYNTHETIC data, not a real embedding corpus (SIFT-1M or similar). It exists so the
-Go index and Python's independent ground truth can be measured against each other without
-a multi-gigabyte download blocking the benchmark from running at all. The vectors are drawn
-from a mixture of Gaussian clusters rather than pure uniform noise, because clustered data
-is closer to how real embeddings behave (semantically similar items form neighbourhoods)
-and is a meaningfully harder, more realistic recall test than uniform random points, which
-are usually close to equidistant from everything in high dimension.
+This is not a real embedding set. It is drawn from a mix of Gaussian clusters rather than
+uniform noise, because in high dimensions uniform points are all about the same distance
+apart, which makes nearest-neighbour search too easy to get right (or meaningless).
 """
 
 import argparse

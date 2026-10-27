@@ -103,7 +103,8 @@ func (s *Service) Delete(_ context.Context, request *consensav1.DeleteRequest) (
 	return &consensav1.DeleteResponse{}, nil
 }
 
-// Status reports this process's Raft role and term when the index is Raft-backed.
+// Status reports whether this node is the Raft leader, and its term, when the index is
+// Raft-backed.
 func (s *Service) Status(context.Context, *consensav1.StatusRequest) (*consensav1.StatusResponse, error) {
 	replicated, ok := s.index.(interface {
 		Status() (raft.NodeID, uint64, bool)
@@ -115,5 +116,5 @@ func (s *Service) Status(context.Context, *consensav1.StatusRequest) (*consensav
 	if leader {
 		return &consensav1.StatusResponse{Role: "leader", Term: term}, nil
 	}
-	return &consensav1.StatusResponse{Role: "candidate", Term: term}, nil
+	return &consensav1.StatusResponse{Role: "not-leader", Term: term}, nil
 }

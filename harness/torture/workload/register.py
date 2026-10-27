@@ -1,10 +1,6 @@
-"""Register workload: drives a real internal/raft.Cluster (via cmd/torture) under a seeded
-fault schedule and checks the resulting real operation history for linearizability.
-
-Before this existed, run() checked a fixed, hand-written two-operation history that never
-touched Go and never depended on the seed or nemesis schedule at all -- torture run
---seeds 5000 would have repeated the identical check 5000 times and always passed,
-regardless of whether Consensa's Raft implementation actually had a bug.
+"""Register workload: runs cmd/torture (a Raft cluster in one process) under a fault
+schedule made from a seed, then checks the reads and writes it recorded for linearizability.
+The same seed always gives the same fault schedule, so a failing seed can be replayed.
 """
 
 import json
@@ -19,8 +15,7 @@ _BINARY_PATH: Path | None = None
 
 
 def _binary() -> Path:
-    """Builds cmd/torture once per process and reuses it -- rebuilding per seed would waste
-    most of a run's wall-clock time on `go build` rather than actual fault injection."""
+    """Builds cmd/torture the first time and reuses it, so a run does not rebuild per seed."""
     global _BINARY_PATH
     if _BINARY_PATH is None:
         out = REPO_ROOT / "harness" / "torture" / ".torture-bin"
@@ -35,11 +30,7 @@ def _binary() -> Path:
 
 
 def run(seed: int = 0, nemeses: list[str] | None = None, steps: int = 20, nodes: int = 3) -> bool:
-    """Drives a real Raft cluster under a seeded fault schedule and checks the resulting
-    real operation history for linearizability. The same seed and nemeses always produce
-    the same fault schedule (harness/torture/nemesis.py's schedule is a pure function of
-    them), so a failing seed is reproducible.
-    """
+    """Runs one seed. Returns True if the recorded history is linearizable."""
     faults = schedule(seed, nemeses or [], steps, nodes)
     faults_json = json.dumps([f.__dict__ for f in faults])
 

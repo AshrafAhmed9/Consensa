@@ -1,4 +1,4 @@
-"""Command-line entry point for running or replaying deterministic harness histories."""
+"""Command line for the torture harness: run many seeds, or replay a saved failing seed."""
 
 import argparse
 from pathlib import Path

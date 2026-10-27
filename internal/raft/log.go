@@ -2,27 +2,23 @@ package raft
 
 import "errors"
 
+// raftLog holds the entries a node knows about. entries[0] is a placeholder (the entry
+// just before the log starts, or the snapshot point), so real entries start at index 1.
 type raftLog struct {
 	entries            []Entry
-	committed, applied uint64
+	committed, applied uint64 // highest index known committed / handed to the state machine
 	snapshot           Snapshot
 }
 
-func newLog() *raftLog               { return &raftLog{entries: []Entry{{}}} }
+func newLog() *raftLog { return &raftLog{entries: []Entry{{}}} }
+
 func (l *raftLog) lastIndex() uint64 { return l.entries[len(l.entries)-1].Index }
-// term looks up an entry's term by direct index arithmetic rather than a linear scan:
-// append enforces that every new entry's Index is exactly lastIndex()+1 (strictly
-// contiguous, never a gap), and truncation only ever removes a contiguous suffix, so
-// entries[i].Index == entries[0].Index+i holds as an invariant for the whole slice at
-// every point in this type's lifetime. That makes this O(1) instead of O(len(entries)),
-// which matters because it is called from advanceCommit -- itself invoked on every
-// single AppendEntries response, including plain heartbeats -- so its own cost multiplies
-// directly into the hot replication path. Found as a real, reproducible CI/local
-// regression, not by inspection: joint consensus's advanceCommit (node.go) checks
-// multiple candidate commit indices per call instead of the prior single-quorum
-// implementation's one, and under a continuously growing log (e.g. periodic
-// AdvanceClosedTimestamp proposals) the multiplied linear-scan cost was enough to
-// destabilize leadership in cmd/consensa's own three-process end-to-end test.
+
+// term returns the term of the entry at index i, and false if we don't have it.
+//
+// Entries are always contiguous (append never leaves gaps), so the entry for index i sits
+// at position i - entries[0].Index. That makes this a direct lookup instead of a scan,
+// which matters because it runs on every append response, including heartbeats.
 func (l *raftLog) term(i uint64) (uint64, bool) {
 	if i == l.snapshot.Index {
 		return l.snapshot.Term, true
@@ -41,6 +37,9 @@ func (l *raftLog) term(i uint64) (uint64, bool) {
 	}
 	return entry.Term, true
 }
+
+// append adds entries to the log. If an incoming entry conflicts with one we already
+// have (same index, different term), our entry and everything after it is dropped first.
 func (l *raftLog) append(es []Entry) error {
 	for _, e := range es {
 		if e.Index == 0 {
@@ -48,7 +47,7 @@ func (l *raftLog) append(es []Entry) error {
 		}
 		if e.Index <= l.lastIndex() {
 			if old, ok := l.term(e.Index); ok && old == e.Term {
-				continue
+				continue // already have this exact entry
 			}
 			keep := 0
 			for keep < len(l.entries) && l.entries[keep].Index < e.Index {
@@ -64,6 +63,8 @@ func (l *raftLog) append(es []Entry) error {
 	}
 	return nil
 }
+
+// entriesFrom returns a copy of every entry from index i onward.
 func (l *raftLog) entriesFrom(i uint64) []Entry {
 	if i > l.lastIndex() {
 		return nil

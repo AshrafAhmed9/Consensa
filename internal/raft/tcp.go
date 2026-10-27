@@ -13,9 +13,8 @@ import (
 
 const maxMessageBytes = 16 << 20
 
-// TCPTransport is the production-facing message adapter for a Raft host. It uses one
-// length-prefixed JSON frame per connection so framing remains visible and testable; Raft
-// itself remains a pure state machine that knows nothing about sockets or goroutines.
+// TCPTransport sends and receives Raft messages over TCP. Each message is one JSON frame
+// with a 4-byte length in front, sent on its own short-lived connection.
 type TCPTransport struct {
 	id       NodeID
 	listener net.Listener
@@ -26,8 +25,8 @@ type TCPTransport struct {
 	close    sync.Once
 }
 
-// ListenTCP accepts Raft messages for id. peers must contain the remote node addresses
-// used by Send; inbound messages are checked before the supplied state-machine callback.
+// ListenTCP starts listening for messages addressed to id and passes each one to handle.
+// peers maps every other node to the address Send should dial.
 func ListenTCP(id NodeID, address string, peers map[NodeID]string, handle func(Message) error) (*TCPTransport, error) {
 	if id == 0 || handle == nil {
 		return nil, errors.New("raft: transport ID and handler required")
@@ -44,19 +43,18 @@ func ListenTCP(id NodeID, address string, peers map[NodeID]string, handle func(M
 	return transport, nil
 }
 
-// Addr returns the bound listener address, including an OS-assigned port when requested.
+// Addr returns the address being listened on (useful when the port was chosen by the OS).
 func (t *TCPTransport) Addr() net.Addr { return t.listener.Addr() }
 
-// AddPeer implements PeerRegistrar (transport.go) -- see that interface's doc comment.
-// Safe to call concurrently with Send: peersMu guards every access to peers.
+// AddPeer registers or updates the address of a peer. It is safe to call while sending.
 func (t *TCPTransport) AddPeer(id NodeID, address string) {
 	t.peersMu.Lock()
 	defer t.peersMu.Unlock()
 	t.peers[id] = address
 }
 
-// Send encodes one complete message frame and waits for the peer to receive it. The frame
-// limit prevents a malformed length prefix from allocating unbounded memory on a node.
+// Send delivers one message to its destination, or returns an error if the peer is
+// unknown or cannot be reached.
 func (t *TCPTransport) Send(message Message) error {
 	t.peersMu.RLock()
 	address, ok := t.peers[message.To]
@@ -76,17 +74,8 @@ func (t *TCPTransport) Send(message Message) error {
 		return err
 	}
 	defer func() { _ = connection.Close() }()
-	// Without a write deadline, a stalled peer (one whose own receive loop isn't draining
-	// its socket -- e.g. because it's itself blocked acquiring its Host's mutex under heavy
-	// load) can block this write indefinitely once the kernel's send buffer fills. Host.
-	// driveLocked calls Send while holding h.mu (host.go), so an indefinite block here
-	// holds that lock forever too -- which can cascade into a real cross-process deadlock
-	// if enough peers end up in this state simultaneously (found chasing an apparent hang
-	// in a heavy multi-group ann split test under real machine contention: many goroutines
-	// stuck inside this exact call, past their supposed 1-second dial timeout, which only
-	// bounds DialTimeout itself, not the write that follows). One second matches the dial
-	// timeout above; a write that slow indicates the same kind of unhealthy peer dialing
-	// already treats as a failure to route around.
+	// Without a deadline a stuck peer could block this write forever. The caller holds the
+	// host lock while sending, so that would freeze the whole node.
 	if err := connection.SetDeadline(time.Now().Add(time.Second)); err != nil {
 		return err
 	}
@@ -96,7 +85,7 @@ func (t *TCPTransport) Send(message Message) error {
 	return nil
 }
 
-// Close stops accepting new connections. Existing handlers finish their current frame.
+// Close stops accepting new connections.
 func (t *TCPTransport) Close() error {
 	var err error
 	t.close.Do(func() {
@@ -106,6 +95,7 @@ func (t *TCPTransport) Close() error {
 	return err
 }
 
+// accept takes incoming connections and handles each in its own goroutine.
 func (t *TCPTransport) accept() {
 	for {
 		connection, err := t.listener.Accept()
@@ -121,6 +111,7 @@ func (t *TCPTransport) accept() {
 	}
 }
 
+// receive reads one message from a connection and passes it to the handler.
 func (t *TCPTransport) receive(connection net.Conn) {
 	defer func() { _ = connection.Close() }()
 	data, err := readFrame(bufio.NewReader(connection))
@@ -134,6 +125,7 @@ func (t *TCPTransport) receive(connection net.Conn) {
 	_ = t.handle(message)
 }
 
+// writeFrame writes a 4-byte length followed by the data.
 func writeFrame(writer io.Writer, data []byte) error {
 	if len(data) > maxMessageBytes {
 		return errors.New("raft: message exceeds transport limit")
@@ -147,13 +139,8 @@ func writeFrame(writer io.Writer, data []byte) error {
 	return err
 }
 
-// readFrame reads one length-prefixed frame from reader. The caller owns reader's
-// buffering and lifetime -- readFrame used to wrap its argument in a fresh bufio.Reader on
-// every call, which is correct for a connection read exactly once (TCPTransport's
-// original one-frame-per-connection design) but silently drops data on a connection read
-// in a loop: a fresh bufio.Reader's first Read can pull more bytes off the socket than
-// this one frame needs, and discarding that bufio.Reader at return time throws away
-// whatever of the *next* frame it already buffered. A connection read in a loop is where this shows up.
+// readFrame reads one length-prefixed frame, rejecting sizes above the limit so a bad
+// length cannot make us allocate huge memory.
 func readFrame(reader *bufio.Reader) ([]byte, error) {
 	var length [4]byte
 	if _, err := io.ReadFull(reader, length[:]); err != nil {

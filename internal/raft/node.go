@@ -5,8 +5,10 @@ import (
 	"sort"
 )
 
-// Ready describes work outside the pure state machine. Persist HardState and Entries
-// before sending Messages: this ordering is Raft's durable-vote and durable-log safety boundary.
+// Ready is the work the caller must do after the node has changed state. Do it in this
+// order: save HardState and Entries to disk, then send Messages, then apply
+// CommittedEntries. Saving before sending is what keeps votes and log entries from
+// being lost in a crash.
 type Ready struct {
 	HardState        HardState
 	Entries          []Entry
@@ -15,52 +17,43 @@ type Ready struct {
 	Messages         []Message
 }
 
-// Node is a deterministic Raft replica. Time advances only through Tick and no method
-// blocks, which lets the simulator enumerate delivery schedules exactly.
+// Node is one Raft replica. It does no I/O and starts no goroutines: time moves only when
+// Tick is called, and messages come in through Step and go out through Ready. That makes
+// it easy to test.
 type Node interface {
+	// Step handles one message from another node.
 	Step(Message) error
+	// Tick advances the election and heartbeat clocks by one.
 	Tick()
+	// Propose appends data to the log. Only the leader accepts it.
 	Propose([]byte) error
-	// ProposeConfChange begins a membership transition to newVoters/newLearners via the
-	// joint-consensus protocol (see confchange.go's own doc comments for the full
-	// safety argument). Only the leader may call it, and only when no transition is
-	// already in progress; the leave-joint follow-up that finalizes the transition is
-	// automatic once the joint entry itself commits, never a second caller-driven call.
+	// ProposeConfChange starts a change of voters/learners using joint consensus (see
+	// confchange.go). Only the leader may call it, and only when no change is already
+	// running. The leader finishes the change itself once the first step commits.
 	ProposeConfChange(newVoters, newLearners []NodeID) error
-	// AddKnownPeer extends this replica's local peer universe (n.peers) to include id, a
-	// prerequisite ProposeConfChange enforces before it will let id join newVoters or
-	// newLearners -- see ProposeConfChange's own doc comment for why "known peer" and
-	// "current voter/learner" are deliberately different sets. Unlike ProposeConfChange,
-	// this is local, per-replica bookkeeping, not something Raft's commit protocol
-	// replicates: it touches neither Membership (quorum accounting is unchanged) nor the
-	// log, so it must be called independently on every existing replica, not just the
-	// leader. A no-op if id is already known.
+	// AddKnownPeer tells this node that id exists, which ProposeConfChange requires
+	// before id can be added as a voter or learner. It is local bookkeeping, not
+	// replicated, so call it on every node. It does nothing if id is already known.
 	AddKnownPeer(id NodeID)
+	// Ready returns the pending work, and Advance marks it as done.
 	Ready() Ready
 	Advance()
-	// Status reports this replica's own view of its role and term, for administrative
-	// and diagnostic surfaces. It is read-only and never changes protocol behavior.
+	// Status returns this node's role and term.
 	Status() (Role, uint64)
-	// Leader reports the NodeID this replica currently believes leads the group, or 0 if
-	// unknown (never yet heard from a leader, or a follower whose term just advanced past
-	// an election with no winner seen yet). Like Status, this is a local, possibly-stale
-	// view, useful for diagnostics and for deciding whom to ask for a leadership transfer
-	// -- never a substitute for Raft's own leader-confirmation inside a request/response.
+	// Leader returns who this node believes the leader is, or 0 if it doesn't know. This
+	// is a local guess and can be out of date.
 	Leader() NodeID
-	// ConfState returns the membership that must accompany any snapshot created from this
-	// replica. A snapshot without it cannot safely replace the configuration entries in
-	// the compacted log prefix.
+	// ConfState returns the voter configuration to store with a snapshot.
 	ConfState() ConfState
 }
+
 type node struct {
 	id    NodeID
 	peers []NodeID
 
-	// initialMembership is the voter/learner configuration NewNode was constructed with,
-	// used as recomputeMembership's base case when no confChangeEntry exists in the log
-	// yet. membership/membershipIndex are recomputed from the log itself after every
-	// append (see recomputeMembership's own doc comment for why this is a full rescan
-	// rather than incremental state).
+	// initialMembership is the configuration the node started with. membership is the one
+	// in effect now: the newest config entry in the log, or initialMembership if there is
+	// none. membershipIndex is that entry's log index.
 	initialMembership Membership
 	membership        Membership
 	membershipIndex   uint64
@@ -77,7 +70,7 @@ type node struct {
 	lastHard                                                       HardState
 }
 
-// NewNode creates a follower with a sentinel log entry.
+// NewNode creates a follower with an empty log.
 func NewNode(c Config) (Node, error) {
 	if c.ID == 0 || len(c.Peers) == 0 {
 		return nil, errors.New("raft: ID and peers required")
@@ -122,6 +115,8 @@ func NewNode(c Config) (Node, error) {
 	return n, nil
 }
 
+// Tick advances the clocks. A leader sends heartbeats; a voter that has heard nothing
+// from a leader for too long starts a pre-vote.
 func (n *node) Tick() {
 	n.electionElapsed++
 	if n.role == Leader {
@@ -131,17 +126,14 @@ func (n *node) Tick() {
 			n.broadcastAppend()
 		}
 	}
-	// A non-voter (a learner, or a node this transition has removed) never starts an
-	// election, no matter how long it goes without hearing from a leader: it could never
-	// actually win one (no real voter would count its vote request toward HasQuorum --
-	// see startPreVote/startElection below, which only message n.votingPeers()), and
-	// letting it try would just be wasted messages on every election timeout for as long
-	// as it stays outside the voting configuration.
+	// Learners and removed nodes never start elections: they could not win one.
 	if n.electionElapsed >= n.electionTick && n.role != Leader && n.isVoter(n.id) {
 		n.electionElapsed = 0
 		n.startPreVote()
 	}
 }
+
+// Propose appends data to the log and sends it to the followers. Only the leader can.
 func (n *node) Propose(data []byte) error {
 	if n.role != Leader {
 		return errors.New("raft: proposal to non-leader")
@@ -149,26 +141,16 @@ func (n *node) Propose(data []byte) error {
 	return n.proposeInternal(data)
 }
 
-// proposeInternal is Propose's shared implementation, also used by ProposeConfChange and
-// proposeLeaveJoint (confchange.go) to append a raft-internal configuration entry through
-// the identical log-append/broadcast path ordinary application data uses -- a
-// configuration change is replicated and made safe by exactly the same mechanism as any
-// other entry, which is the whole point of representing it as a log entry rather than as
-// some separate out-of-band protocol.
+// proposeInternal is the shared append path. Config changes go through it too, so they
+// are replicated and committed like any other entry.
 func (n *node) proposeInternal(data []byte) error {
 	e := Entry{Index: n.log.lastIndex() + 1, Term: n.term, Data: data}
 	if err := n.log.append([]Entry{e}); err != nil {
 		return err
 	}
-	// Only a config-change entry can possibly change membership, and a leader's own
-	// append (always at lastIndex()+1) never truncates anything the way a follower's
-	// conflict-resolving append can -- so checking just this one entry, rather than
-	// rescanning the whole log, is both sufficient and correct here, not merely an
-	// optimization applied where it happens to be safe. "On append, not on commit" (see
-	// confChangeEntry's doc comment) is preserved: this still runs before the entry is
-	// sent to anyone else. Rescanning the full log on every single Propose call --
-	// including every ordinary application write, the actual hot path under load -- was
-	// the real cost the CI regression this comment replaces came from.
+	// A new config entry takes effect as soon as it is in the log, before it commits.
+	// Only config entries can change membership, so there is no need to rescan the log
+	// for ordinary data.
 	if _, ok := decodeConfChange(data); ok {
 		n.recomputeMembership()
 	}
@@ -177,12 +159,14 @@ func (n *node) proposeInternal(data []byte) error {
 	n.broadcastAppend()
 	return nil
 }
+
+// Step handles one incoming message.
 func (n *node) Step(m Message) error {
 	if m.To != 0 && m.To != n.id {
 		return errors.New("raft: wrong destination")
 	}
-	// Pre-vote asks whether an election would be viable; adopting its prospective term
-	// would defeat pre-vote by letting an isolated node disrupt a healthy leader.
+	// A higher term makes us a follower. Pre-vote messages are the exception: they carry a
+	// term that has not happened yet, and adopting it would defeat the point of pre-vote.
 	if m.Type != MsgPreVote && m.Type != MsgPreVoteResp && m.Term > n.term {
 		n.becomeFollower(m.Term, 0)
 	}
@@ -206,6 +190,8 @@ func (n *node) Step(m Message) error {
 	}
 	return nil
 }
+
+// Ready collects everything the caller still has to save, send and apply.
 func (n *node) Ready() Ready {
 	r := Ready{HardState: HardState{Term: n.term, Vote: n.vote, Commit: n.log.committed}, Entries: cloneEntries(n.unstable), Messages: append([]Message(nil), n.msgs...)}
 	if n.log.applied < n.log.committed {
@@ -216,6 +202,8 @@ func (n *node) Ready() Ready {
 	}
 	return r
 }
+
+// Advance marks the last Ready as handled.
 func (n *node) Advance() {
 	n.unstable = nil
 	n.msgs = nil
@@ -227,6 +215,8 @@ func (n *node) Status() (Role, uint64) { return n.role, n.term }
 func (n *node) Leader() NodeID         { return NodeID(n.leader) }
 func (n *node) ConfState() ConfState   { return confStateFromMembership(n.membership) }
 func (n *node) send(m Message)         { m.From = n.id; n.msgs = append(n.msgs, m) }
+
+// becomeFollower steps down (or stays a follower) in the given term.
 func (n *node) becomeFollower(term uint64, leader NodeID) {
 	n.role = Follower
 	n.term = term
@@ -236,6 +226,8 @@ func (n *node) becomeFollower(term uint64, leader NodeID) {
 	n.preVote = false
 	n.electionElapsed = 0
 }
+
+// becomeLeader starts leading: it begins replicating from the end of its own log.
 func (n *node) becomeLeader() {
 	n.role = Leader
 	n.leader = uint64(n.id)
@@ -245,16 +237,17 @@ func (n *node) becomeLeader() {
 	for _, p := range n.peers {
 		n.next[p] = n.log.lastIndex() + 1
 	}
-	// A joint entry inherited from a crashed leader can be from an older term. The Raft
-	// current-term commit rule correctly refuses to commit it on acknowledgements alone;
-	// append an internal no-op now so the new leader can establish a current-term commit
-	// under the dual-majority rule without waiting for an unrelated client proposal.
+	// If a joint config entry from a previous leader is still in the log, Raft will not
+	// commit it by counting replies alone, because it is from an old term. Appending an
+	// empty entry in our own term lets it commit without waiting for a client write.
 	if n.membership.Joint {
 		_ = n.proposeInternal(append([]byte(nil), jointLeaderNoop...))
 		return
 	}
 	n.broadcastAppend()
 }
+
+// broadcastAppend sends every other node whatever log entries it is missing.
 func (n *node) broadcastAppend() {
 	for _, p := range n.peers {
 		if p != n.id {
@@ -262,12 +255,16 @@ func (n *node) broadcastAppend() {
 		}
 	}
 }
+
+// sendAppend sends one node the entries after the last one we think it has.
 func (n *node) sendAppend(to NodeID) {
 	next := n.next[to]
 	prev := next - 1
 	pt, _ := n.log.term(prev)
 	n.send(Message{Type: MsgAppend, To: to, Term: n.term, Index: prev, LogTerm: pt, Commit: n.log.committed, Entries: n.log.entriesFrom(next)})
 }
+
+// handleAppend handles log entries (or a heartbeat) from the leader.
 func (n *node) handleAppend(m Message) {
 	if m.Term < n.term {
 		n.send(Message{Type: MsgAppendResp, To: m.From, Term: n.term, Reject: true, Index: n.log.lastIndex()})
@@ -282,14 +279,7 @@ func (n *node) handleAppend(m Message) {
 		return
 	}
 	if len(m.Entries) > 0 {
-		// raftLog.append only ever truncates or extends the log as a direct result of
-		// appending a non-empty entry batch (see log.go) -- a bare heartbeat (empty
-		// Entries) changes nothing about what's in the log, so it cannot possibly change
-		// what recomputeMembership would find, and calling it on every single heartbeat
-		// tick regardless is a real O(log length) cost paid for nothing. Found as an
-		// actual CI failure under sustained load (a long-running e2e test's leadership
-		// went unstable, "proposal to non-leader"), not by inspection -- this call used
-		// to run unconditionally here.
+		// Only a non-empty batch can change the log, so only then can membership change.
 		n.recomputeMembership()
 		n.unstable = append(n.unstable, cloneEntries(m.Entries)...)
 	}
@@ -298,6 +288,8 @@ func (n *node) handleAppend(m Message) {
 	}
 	n.send(Message{Type: MsgAppendResp, To: m.From, Term: n.term, Index: n.log.lastIndex()})
 }
+
+// handleAppendResp updates what we know a follower has, and commits what a quorum has.
 func (n *node) handleAppendResp(m Message) {
 	if n.role != Leader || m.Term != n.term {
 		return
@@ -316,22 +308,14 @@ func (n *node) handleAppendResp(m Message) {
 		n.sendAppend(m.From)
 	}
 }
+
+// advanceCommit commits the highest entry that a quorum of voters has, if it is from the
+// current term (an older-term entry is only committed along with a newer one).
+//
+// Learners are not counted. While a membership change is joint, the quorum needs a
+// majority of both the old and new voters (see Membership). That check is not a simple
+// "n-th highest match index", so each candidate index is tried from the highest down.
 func (n *node) advanceCommit() {
-	// Only voters count toward what's committed -- Raft §5.4.2's safety property is
-	// "replicated on a majority of VOTERS," not "replicated on a majority of anything
-	// receiving the log." A learner's match progress still gets tracked (so it can be
-	// promoted once caught up) but must never let an entry be counted committed on the
-	// strength of learners alone, which would let a value be visible before it's actually
-	// safe against a leader election among the real voters.
-	//
-	// During the joint phase this must be a majority of Old AND a majority of New
-	// separately (Membership.HasQuorum), not a majority of their union -- the entire
-	// reason joint consensus exists is that a union-based majority could be satisfied by
-	// two DISJOINT sets of servers, one under the old configuration and one under the
-	// new, each of which could independently elect an incompatible leader. Candidate
-	// commit indices are checked from the highest down, since HasQuorum's dual
-	// requirement isn't monotonic in a single sorted array the way a simple majority's
-	// "n-th highest match" trick assumes.
 	candidates := map[uint64]bool{n.log.lastIndex(): true}
 	for _, m := range n.match {
 		candidates[m] = true
@@ -364,15 +348,10 @@ func (n *node) advanceCommit() {
 	}
 }
 
-// maybeLeaveJointOrStepDown runs after every successful commit advance and closes two
-// things joint consensus needs beyond plain quorum safety: (1) once this leader observes
-// the joint (C_old,new) entry itself has committed, it automatically proposes the
-// finalizing entry -- the paper's own two-step protocol, never both entries at once, and
-// never a caller's job to sequence; recomputeMembership flips n.membership.Joint to false
-// the instant this call appends that entry, so a repeated call here is naturally a no-op
-// once it's done. (2) once membership is no longer joint and this node is no longer a
-// voter at all (it was removed), a leader steps down rather than continuing to act as
-// leader for a configuration it isn't even a member of.
+// maybeLeaveJointOrStepDown runs after the commit index moves. It does two things:
+//  1. Once the joint config entry has committed, the leader proposes the second entry
+//     that finishes the change.
+//  2. If the finished change removed this leader from the voters, it steps down.
 func (n *node) maybeLeaveJointOrStepDown() {
 	if n.role != Leader {
 		return
@@ -385,6 +364,8 @@ func (n *node) maybeLeaveJointOrStepDown() {
 		n.becomeFollower(n.term, 0)
 	}
 }
+
+// cloneEntries copies entries so later changes to the log do not affect them.
 func cloneEntries(in []Entry) []Entry {
 	out := make([]Entry, len(in))
 	for i, e := range in {

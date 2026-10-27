@@ -8,44 +8,41 @@ import (
 	"github.com/ashraf/consensa/internal/vector"
 )
 
-// DurableNode is one HNSW replica backed by a real Raft transport and an on-disk storage
-// engine. Its durability is not implemented by snapshotting the graph: Persister already writes every committed Raft
-// entry to the LSM (see internal/raft/storage.go), and RecoverNode restores committed-but-
-// not-yet-applied entries into a fresh Ready() on restart. DurableNode's Apply callback is
-// exactly HNSW.ApplyMutation, so a killed-and-restarted node recovers its whole graph by
-// replaying its own persisted Raft log — no HNSW-specific persistence code is required.
+// DurableNode is one replica of the vector index. It joins three things:
+//   - a Raft host, which agrees with the other replicas on the order of inserts and deletes;
+//   - an on-disk store, where Raft saves its log;
+//   - an HNSW graph, which every committed insert or delete is applied to.
+//
+// The graph itself is never saved. After a restart the node replays its own Raft log
+// into an empty graph and ends up with the same graph as before.
 type DurableNode struct {
-	mu    sync.RWMutex // guards index: Host may invoke apply concurrently with a caller's Search
+	mu    sync.RWMutex // guards index: Raft applies entries while searches run
 	host  *raft.Host
 	db    *storage.DB
 	index *HNSW
 
 	appliedMu sync.Mutex
-	applied   int
+	applied   int // how many entries have been applied to the graph
 }
 
-// DurableNodeConfig names everything one replica needs: its own storage directory (reused
-// verbatim across a restart), the fixed Raft group membership, its own listen address, and
-// the addresses of its peers.
+// DurableNodeConfig describes one replica.
 type DurableNodeConfig struct {
 	ID             raft.NodeID
-	GroupPeers     []raft.NodeID
-	Learners       []raft.NodeID
-	ListenAddress  string
-	TransportPeers map[raft.NodeID]string
-	Transport      raft.Transport
-	StorageDir     string
-	Index          Config
-	ElectionTick   int
-	HeartbeatTick  int
+	GroupPeers     []raft.NodeID          // every node in the group, including this one
+	Learners       []raft.NodeID          // members of GroupPeers that do not vote
+	ListenAddress  string                 // where this node accepts Raft messages from peers
+	TransportPeers map[raft.NodeID]string // address of every other node
+	StorageDir     string                 // directory for the Raft log (reuse it to restart)
+	Index          Config                 // HNSW settings
+	ElectionTick   int                    // defaults to 10
+	HeartbeatTick  int                    // defaults to 2
 }
 
-// NewDurableNode opens (or recovers) the on-disk engine, builds a fresh HNSW graph, and
-// starts the Raft host with Apply wired directly to that graph. If StorageDir already
-// holds a committed log from a previous run, the very first Ready() cycle replays it into
-// the graph before this call returns -- so the returned node is caught up, not empty.
+// NewDurableNode opens the store, builds an empty graph and starts the Raft host. If the
+// directory already holds a log, the committed entries are replayed into the graph the
+// first time the node is ticked, before it talks to any peer.
 func NewDurableNode(cfg DurableNodeConfig) (*DurableNode, error) {
-	db, err := storage.Open(storage.Options{Dir: cfg.StorageDir, SyncEvery: 1})
+	db, err := storage.Open(storage.Options{Dir: cfg.StorageDir}) // Raft syncs once per batch of writes
 	if err != nil {
 		return nil, err
 	}
@@ -63,12 +60,10 @@ func NewDurableNode(cfg DurableNodeConfig) (*DurableNode, error) {
 	if heartbeatTick == 0 {
 		heartbeatTick = 2
 	}
-
 	host, err := raft.NewHost(raft.HostConfig{
 		Raft:          raft.Config{ID: cfg.ID, Peers: cfg.GroupPeers, Learners: cfg.Learners, ElectionTick: electionTick, HeartbeatTick: heartbeatTick},
 		ListenAddress: cfg.ListenAddress,
 		Peers:         cfg.TransportPeers,
-		Transport:     cfg.Transport,
 		Persister:     raft.NewPersister(db),
 		Apply:         d.apply,
 	})
@@ -80,6 +75,7 @@ func NewDurableNode(cfg DurableNodeConfig) (*DurableNode, error) {
 	return d, nil
 }
 
+// apply runs for every committed Raft entry, in order, and updates the graph.
 func (d *DurableNode) apply(entry raft.Entry) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -92,30 +88,20 @@ func (d *DurableNode) apply(entry raft.Entry) error {
 	return nil
 }
 
-// AppliedCount reports how many mutations this replica has applied so far -- since Propose
-// does not block for commit (real replication over TCP is asynchronous by nature), callers
-// that need to observe a write land poll this rather than assuming Insert/Delete succeeded.
+// AppliedCount returns how many entries this node has applied. Insert and Delete return
+// as soon as the entry is proposed, not when it is committed, so callers that need to
+// see a write take effect (tests, mostly) poll this.
 func (d *DurableNode) AppliedCount() int {
 	d.appliedMu.Lock()
 	defer d.appliedMu.Unlock()
 	return d.applied
 }
 
-// Tick drives this replica's election/heartbeat clock and processes any resulting work.
-// The caller is responsible for calling it on a regular interval; see driveHosts in
-// internal/raft/host_test.go for the pattern this mirrors.
+// Tick moves this node's Raft clock forward. Call it regularly (for example every 50ms).
 func (d *DurableNode) Tick() error { return d.host.Tick() }
 
-// ProposeConfChange changes voters among the transport-known peer universe. A new peer
-// must start as a caught-up learner before its promotion is proposed to the current leader.
-func (d *DurableNode) ProposeConfChange(voters, learners []raft.NodeID) error {
-	return d.host.ProposeConfChange(voters, learners)
-}
-
-// Insert proposes an encoded mutation to this replica. It only succeeds if this replica is
-// currently the Raft leader, matching Host.Propose's contract -- callers without a known
-// leader should retry across replicas the way internal/raft/host_test.go's
-// proposeToLeader does.
+// Insert proposes adding or replacing a vector. It only works on the Raft leader; on any
+// other node it returns an error and the caller should try another node.
 func (d *DurableNode) Insert(id string, v vector.Vector) error {
 	data, err := EncodeMutation(id, v)
 	if err != nil {
@@ -124,7 +110,7 @@ func (d *DurableNode) Insert(id string, v vector.Vector) error {
 	return d.host.Propose(data)
 }
 
-// Delete proposes a deterministic deletion mutation. See Insert for the leader contract.
+// Delete proposes removing a vector. Like Insert, it only works on the leader.
 func (d *DurableNode) Delete(id string) error {
 	data, err := EncodeDeleteMutation(id)
 	if err != nil {
@@ -133,41 +119,35 @@ func (d *DurableNode) Delete(id string) error {
 	return d.host.Propose(data)
 }
 
-// Search reads from this replica's local graph. It does not consult Raft leadership: once a
-// mutation is applied, every replica's graph is equal by construction (Mutation.go's
-// determinism guarantee), so any replica -- not only the leader -- may safely serve reads.
+// Search reads this node's own graph, so any node can answer, not just the leader. Once
+// an entry is applied, every replica's graph is identical. A replica that has not applied
+// the newest entries yet may return slightly older results.
 func (d *DurableNode) Search(query vector.Vector, k, ef int) ([]Result, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.index.Search(query, k, ef)
 }
 
-// Validate checks a vector against this replica's graph configuration.
+// Validate checks a vector against the graph settings (length, no NaN or infinity).
 func (d *DurableNode) Validate(v vector.Vector) error {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.index.Validate(v)
 }
 
-// Addr returns this replica's bound transport address, useful when ListenAddress was
-// "127.0.0.1:0" and the OS assigned the actual port.
+// Addr returns the address this node accepts Raft messages on (useful when the OS
+// picked the port).
 func (d *DurableNode) Addr() string { return d.host.Addr() }
 
-// Status reports this replica's own view of its Raft role and term, matching the shape
-// server.Service.Status already expects via a duck-typed interface. The returned id is
-// this replica's own recognized leader (0 if unknown), from Host.Leader -- not a
-// guarantee of cluster-wide accuracy, just this replica's local, possibly-stale view.
-func (d *DurableNode) Status() (id raft.NodeID, term uint64, isLeader bool) {
+// Status returns this node's view of the current leader, the current term, and whether
+// this node is the leader. It is a local view and can be out of date.
+func (d *DurableNode) Status() (leader raft.NodeID, term uint64, isLeader bool) {
 	role, term := d.host.Status()
 	return d.host.Leader(), term, role == raft.Leader
 }
 
-// Leader returns this replica's own recognized leader for the group, or 0 if unknown.
-func (d *DurableNode) Leader() raft.NodeID { return d.host.Leader() }
-
-// Close stops the transport and closes the storage engine. It does not delete StorageDir:
-// a caller that reopens NewDurableNode against the same directory afterward is exactly the
-// crash-restart-and-recover scenario this type exists to support.
+// Close stops the node and closes the store. It keeps the files, so a new node opened on
+// the same directory resumes where this one left off.
 func (d *DurableNode) Close() error {
 	if err := d.host.Close(); err != nil {
 		return err

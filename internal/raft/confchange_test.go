@@ -2,11 +2,8 @@ package raft
 
 import "testing"
 
-// newConfChangeGroup constructs every node with the FULL peer universe ids (so any of
-// them can later be a valid ProposeConfChange target -- see its own doc comment on why a
-// target must already be a known peer), but only voters actually participate in quorum
-// from construction; everyone else starts as a learner, matching the realistic scenario
-// ProposeConfChange exists for: promoting an already-known-but-not-yet-voting replica.
+// newConfChangeGroup builds a group where every node knows all of ids, but only the given
+// voters vote; the rest start as learners and can be promoted later.
 func newConfChangeGroup(t *testing.T, ids []NodeID, voters []NodeID) map[NodeID]*node {
 	t.Helper()
 	voterSet := map[NodeID]bool{}
@@ -60,14 +57,10 @@ func deliverConfChangeFiltered(nodes map[NodeID]Node, allow func(Message) bool) 
 	}
 }
 
-// TestConfChangeAppliesOnAppendNotOnCommit proves the specific rule confChangeEntry's own
-// doc comment names as the one that makes joint consensus safe: a proposing leader's own
-// membership view changes the instant it appends the entry to ITS OWN log, before the
-// entry has reached any other node, let alone committed. Getting this backwards (waiting
-// for commit) is a real, documented way to implement joint consensus incorrectly -- it
-// would mean the leader itself evaluates later quorum decisions (including whether the
-// joint entry itself can commit) against the OLD configuration only, which can silently
-// reintroduce the disjoint-majority problem this feature exists to close.
+// TestConfChangeAppliesOnAppendNotOnCommit proves the leader switches to the joint
+// config as soon as it appends the entry to its own log, not when the entry commits.
+// Waiting for the commit would make the leader judge the joint entry itself against the
+// old config only, which can bring back the disjoint-majority problem.
 func TestConfChangeAppliesOnAppendNotOnCommit(t *testing.T) {
 	// Constructed with the full 5-peer universe (matching ProposeConfChange's own
 	// requirement that every transition target already be a known, transport-reachable
@@ -99,13 +92,10 @@ func TestConfChangeAppliesOnAppendNotOnCommit(t *testing.T) {
 	}
 }
 
-// TestJointConfigRejectsDisjointMajorities is this feature's Figure-8-equivalent proof:
-// the specific failure mode joint consensus exists to prevent must actually be prevented,
-// not just modeled correctly by Membership.HasQuorum in isolation (already proven by
-// TestJointMembershipRequiresBothMajorities in membership_test.go). Five nodes are
-// manually set to an established joint configuration -- Old={1,2,3}, New={3,4,5}, sharing
-// only node 3 -- mirroring exactly the disjoint-except-for-one-node case the naive
-// "just take a majority of the union" rule would wrongly accept.
+// TestJointConfigRejectsDisjointMajorities proves the real protocol (not just
+// Membership.HasQuorum) refuses the case joint consensus exists to prevent. Five nodes
+// are put in a joint config of Old={1,2,3} and New={3,4,5}, which share only node 3. A
+// plain majority of the union would wrongly accept votes from disjoint groups.
 func TestJointConfigRejectsDisjointMajorities(t *testing.T) {
 	ids := []NodeID{1, 2, 3, 4, 5}
 	ns := newConfChangeGroup(t, ids, ids) // initial voter set is irrelevant: membership is overwritten below
@@ -154,12 +144,9 @@ func TestJointConfigRejectsDisjointMajorities(t *testing.T) {
 	}
 }
 
-// TestJointTransitionCompletesAndFinalizesAutomatically proves the whole live protocol
-// end to end against a real 3-node group over the deterministic in-package deliver()
-// harness: proposing a transition to a 5-node voter set eventually results in every
-// surviving node holding the identical FINAL (non-joint) membership, reached without any
-// caller proposing the leave-joint entry itself -- maybeLeaveJointOrStepDown must do it
-// automatically once the joint entry is observed committed.
+// TestJointTransitionCompletesAndFinalizesAutomatically proves a whole membership change
+// finishes by itself: after proposing a 5-voter set to a 3-node group, every node ends up
+// in the final (non-joint) config without anyone proposing the second step.
 func TestJointTransitionCompletesAndFinalizesAutomatically(t *testing.T) {
 	ids := []NodeID{1, 2, 3, 4, 5}
 	// 1, 2, 3 start as the real, active voters; 4 and 5 start as learners -- already
@@ -241,10 +228,9 @@ func TestRemovedLeaderStepsDown(t *testing.T) {
 	}
 }
 
-// TestJointConfigCannotCommitAcrossANewConfigPartition drives the actual replication
-// path, rather than only calling HasQuorum: old voters 1 and 2 acknowledge the joint
-// entry while every New-only voter is partitioned away. That is a majority of Old but
-// not New, and must leave the transition uncommitted.
+// TestJointConfigCannotCommitAcrossANewConfigPartition proves the joint entry cannot
+// commit when only the old voters 1 and 2 acknowledge it and every new-only voter is cut
+// off. That is a majority of Old but not of New.
 func TestJointConfigCannotCommitAcrossANewConfigPartition(t *testing.T) {
 	ids := []NodeID{1, 2, 3, 4, 5}
 	ns := newConfChangeGroup(t, ids, []NodeID{1, 2, 3})
@@ -272,10 +258,9 @@ func TestJointConfigCannotCommitAcrossANewConfigPartition(t *testing.T) {
 	}
 }
 
-// TestLeaderCrashDuringJointPhaseRecoversSafely covers the failure window joint consensus is
-// designed for. The old leader sends (but cannot commit) C_old,new, then crashes. The
-// survivors that received it must elect using both quorums, commit it under that same
-// rule, and finish the transition without the failed leader.
+// TestLeaderCrashDuringJointPhaseRecoversSafely covers a leader that sends the joint
+// entry (but cannot commit it) and then crashes. The survivors must elect a new leader
+// using both quorums, commit the entry, and finish the change without the old leader.
 func TestLeaderCrashDuringJointPhaseRecoversSafely(t *testing.T) {
 	ids := []NodeID{1, 2, 3, 4, 5}
 	ns := newConfChangeGroup(t, ids, []NodeID{1, 2, 3})
@@ -314,9 +299,8 @@ func TestLeaderCrashDuringJointPhaseRecoversSafely(t *testing.T) {
 	}
 }
 
-// TestUncommittedConfChangeIsForgottenWhenOverwritten covers the leader-change conflict
-// path: membership is effective on append, but an uncommitted config entry that a later
-// leader overwrites must disappear from the follower's quorum state immediately.
+// TestUncommittedConfChangeIsForgottenWhenOverwritten proves that when a new leader
+// overwrites an uncommitted config entry, a follower stops using that config straight away.
 func TestUncommittedConfChangeIsForgottenWhenOverwritten(t *testing.T) {
 	n := newConfChangeGroup(t, []NodeID{1, 2, 3, 4}, []NodeID{1, 2, 3})[2]
 	data, err := marshalConfChange(confChangeEntry{Old: []NodeID{1, 2, 3}, New: []NodeID{1, 2, 3, 4}, Joint: true})

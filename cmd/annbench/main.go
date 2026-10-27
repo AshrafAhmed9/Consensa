@@ -1,7 +1,9 @@
-// Command annbench builds a real ann.HNSW index over a dataset and reports
-// its search results as JSON, so an independent process (the Python recall harness) can
-// compute recall@k against its own brute-force ground truth without trusting anything
-// computed inside this binary.
+// Command annbench builds an HNSW index from a dataset file, runs the dataset's queries
+// against it, and prints the results as JSON.
+//
+// It does not compute recall itself. The Python script harness/bench/run_recall_benchmark.py
+// does that, by comparing these results with its own exact brute-force answers. Keeping
+// the two apart means the Go code is never trusted to mark its own homework.
 package main
 
 import (
@@ -17,100 +19,81 @@ import (
 	"github.com/ashraf/consensa/internal/vector"
 )
 
-type datasetVector struct {
-	ID     string    `json:"id"`
-	Values []float32 `json:"values"`
-}
-
+// dataset is the input file, made by harness/bench/generate_dataset.py.
 type dataset struct {
-	Dimension int             `json:"dimension"`
-	Vectors   []datasetVector `json:"vectors"`
-	Queries   [][]float32     `json:"queries"`
+	Dimension int `json:"dimension"`
+	Vectors   []struct {
+		ID     string    `json:"id"`
+		Values []float32 `json:"values"`
+	} `json:"vectors"`
+	Queries [][]float32 `json:"queries"`
 }
 
+// queryResult holds the IDs found for one query, nearest first.
 type queryResult struct {
 	QueryIndex int      `json:"query_index"`
 	IDs        []string `json:"ids"`
 }
 
+// sweepResult is the outcome of running every query with one efSearch value.
 type sweepResult struct {
-	Param        int           `json:"param"` // efSearch for HNSW, nProbe for IVFFlat
+	Param        int           `json:"param"` // the efSearch used
 	MeanSearchUs float64       `json:"mean_search_us"`
 	Results      []queryResult `json:"results"`
 }
 
+// output is the JSON printed at the end.
 type output struct {
-	IndexKind  string        `json:"index_kind"`
 	BuildMs    float64       `json:"build_ms"`
 	NumVectors int           `json:"num_vectors"`
 	Sweeps     []sweepResult `json:"sweeps"`
 }
 
-// searcher is the narrow contract this tool needs from either real index type -- it
-// deliberately does not import internal/server.Index, since that interface also carries
-// Insert/Delete/Validate that this read-only benchmark tool has no use for.
-type searcher interface {
-	Search(vector.Vector, int, int) ([]ann.Result, error)
-}
-
 func main() {
 	datasetPath := flag.String("dataset", "", "path to a dataset JSON file (see harness/bench/generate_dataset.py)")
-	indexKind := flag.String("index", "hnsw", `only "hnsw" is supported`)
 	k := flag.Int("k", 10, "number of neighbours to request per query")
 	m := flag.Int("m", 16, "HNSW M")
 	efConstruction := flag.Int("ef-construction", 64, "HNSW EFConstruction")
 	sweep := flag.String("sweep", "16,32,64,128", "comma-separated efSearch values to measure")
-	seed := flag.Uint64("seed", 1, "index construction seed (HNSW level assignment)")
+	seed := flag.Uint64("seed", 1, "seed for HNSW level assignment")
 	flag.Parse()
 
 	if *datasetPath == "" {
-		fmt.Fprintln(os.Stderr, "annbench: -dataset is required")
-		os.Exit(1)
+		fatal(fmt.Errorf("-dataset is required"))
 	}
 	raw, err := os.ReadFile(*datasetPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "annbench: reading dataset: %v\n", err)
-		os.Exit(1)
+		fatal(fmt.Errorf("reading dataset: %w", err))
 	}
 	var ds dataset
 	if err := json.Unmarshal(raw, &ds); err != nil {
-		fmt.Fprintf(os.Stderr, "annbench: parsing dataset: %v\n", err)
-		os.Exit(1)
+		fatal(fmt.Errorf("parsing dataset: %w", err))
 	}
-
-	sweepValues, err := parseIntList(*sweep)
+	efValues, err := parseIntList(*sweep)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "annbench: -sweep: %v\n", err)
-		os.Exit(1)
+		fatal(fmt.Errorf("-sweep: %w", err))
 	}
 
-	var index searcher
-	var buildStart = time.Now()
-	switch *indexKind {
-	case "hnsw":
-		h, err := ann.NewHNSW(ann.Config{Dimension: ds.Dimension, M: *m, EFConstruction: *efConstruction, EFSearch: sweepValues[0], Seed: *seed})
-		if err != nil {
+	// Build the index and time how long it takes.
+	buildStart := time.Now()
+	index, err := ann.NewHNSW(ann.Config{Dimension: ds.Dimension, M: *m, EFConstruction: *efConstruction, EFSearch: efValues[0], Seed: *seed})
+	if err != nil {
+		fatal(err)
+	}
+	for _, v := range ds.Vectors {
+		if err := index.Insert(v.ID, vector.Vector(v.Values)); err != nil {
 			fatal(err)
 		}
-		for _, v := range ds.Vectors {
-			if err := h.Insert(v.ID, vector.Vector(v.Values)); err != nil {
-				fatal(err)
-			}
-		}
-		index = h
-	default:
-		fmt.Fprintf(os.Stderr, "annbench: unknown -index %q\n", *indexKind)
-		os.Exit(1)
 	}
-	buildMs := float64(time.Since(buildStart).Microseconds()) / 1000.0
+	out := output{BuildMs: float64(time.Since(buildStart).Microseconds()) / 1000.0, NumVectors: len(ds.Vectors)}
 
-	out := output{IndexKind: *indexKind, BuildMs: buildMs, NumVectors: len(ds.Vectors)}
-	for _, param := range sweepValues {
+	// For each efSearch value, run every query and time the searches.
+	for _, ef := range efValues {
 		var totalSearch time.Duration
 		results := make([]queryResult, 0, len(ds.Queries))
 		for qi, q := range ds.Queries {
 			start := time.Now()
-			hits, err := index.Search(vector.Vector(q), *k, param)
+			hits, err := index.Search(vector.Vector(q), *k, ef)
 			totalSearch += time.Since(start)
 			if err != nil {
 				fatal(err)
@@ -125,7 +108,7 @@ func main() {
 		if len(ds.Queries) > 0 {
 			meanUs = float64(totalSearch.Microseconds()) / float64(len(ds.Queries))
 		}
-		out.Sweeps = append(out.Sweeps, sweepResult{Param: param, MeanSearchUs: meanUs, Results: results})
+		out.Sweeps = append(out.Sweeps, sweepResult{Param: ef, MeanSearchUs: meanUs, Results: results})
 	}
 
 	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
@@ -133,22 +116,20 @@ func main() {
 	}
 }
 
+// parseIntList turns "16,32,64" into []int{16, 32, 64}.
 func parseIntList(s string) ([]int, error) {
-	parts := strings.Split(s, ",")
-	out := make([]int, 0, len(parts))
-	for _, p := range parts {
+	var out []int
+	for _, p := range strings.Split(s, ",") {
 		n, err := strconv.Atoi(strings.TrimSpace(p))
 		if err != nil {
 			return nil, fmt.Errorf("malformed value %q: %w", p, err)
 		}
 		out = append(out, n)
 	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("must name at least one value")
-	}
 	return out, nil
 }
 
+// fatal prints the error and exits.
 func fatal(err error) {
 	fmt.Fprintf(os.Stderr, "annbench: %v\n", err)
 	os.Exit(1)

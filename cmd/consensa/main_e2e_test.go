@@ -15,21 +15,17 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// This is the test that proves the actual deliverable: three SEPARATE OS PROCESSES running
-// the real `consensa` binary, talking over real TCP, each with its own on-disk directory --
-// not goroutines in one process, not the in-memory Cluster demo path. Everything else in the
-// repository tests components; this test builds the binary and runs it the way an operator
-// would, then kills and restarts one process to prove the crash-recovery claim holds for the
-// actual shipped artifact, not just for the DurableNode type in isolation.
+// This test runs three separate OS processes of the real consensa binary, talking over
+// real TCP, each with its own data directory. It writes vectors, kills one process,
+// keeps writing through the other two, restarts the killed process on its old directory,
+// and checks that it serves the data again.
 //
-// It is skipped in -short mode: building a binary and running three real processes through a
-// real election is inherently slower than a unit test and does not belong in a fast inner loop.
+// It builds a binary and starts processes, so it is slower than the other tests and is
+// skipped with -short.
 
-// usedPorts tracks every port freePort has handed out in this test binary run. Closing a
-// listener only releases the port back to the kernel, which can hand the very same ephemeral
-// port to the next Listen("127.0.0.1:0") call before this test gets around to using it -- e.g.
-// giving one node's metrics address the same port as its own raft address. Retrying on a
-// port we've already claimed closes that window.
+// usedPorts remembers the ports freePort has handed out. Closing a listener frees the
+// port, and the OS can give the same port to the very next request, so freePort retries
+// if it sees a port it has already used.
 var usedPorts = map[int]bool{}
 
 func freePort(t *testing.T) int {
@@ -92,12 +88,9 @@ func (n *e2eNode) kill(t *testing.T) {
 	n.cmd = nil
 }
 
-// waitForListening polls with fresh, short-lived TCP dials (not through a pooled gRPC
-// ClientConn, whose internal reconnect backoff can silently outlast a test's own retry
-// loop) until something is listening on addr. Process startup -- disk I/O in
-// storage.Open, then the Raft transport listener, then the gRPC listener -- takes a real,
-// variable amount of wall-clock time, and that startup lag is a different concern from
-// "is this replica the Raft leader," which the rest of this test checks separately.
+// waitForListening waits until something accepts TCP connections on addr. It dials
+// directly instead of using a gRPC connection, which would back off between retries.
+// Start-up (opening the disk store, then the listeners) takes a variable amount of time.
 func waitForListening(t *testing.T, addr string, deadline time.Duration) {
 	t.Helper()
 	end := time.Now().Add(deadline)
@@ -124,10 +117,8 @@ func dialNode(t *testing.T, addr string) consensav1.ConsensaClient {
 	return consensav1.NewConsensaClient(conn)
 }
 
-// upsertUntilAccepted retries an insert across every client until one succeeds. Real
-// distributed writes have no notion of "the" endpoint -- a client is expected to retry
-// against the group until it happens to reach the current leader, exactly as
-// DurableNode.Insert's doc comment describes and as the RAG demo client will eventually do.
+// upsertUntilAccepted tries the insert on every node until one accepts it. Only the Raft
+// leader accepts writes, and the client does not know which node that is.
 func upsertUntilAccepted(t *testing.T, clients []consensav1.ConsensaClient, id string, values []float32, deadline time.Duration) {
 	t.Helper()
 	end := time.Now().Add(deadline)
@@ -244,10 +235,10 @@ func TestConsensaBinaryThreeProcessClusterSurvivesKillAndRestart(t *testing.T) {
 	nodes[3].kill(t)
 	upsertUntilAccepted(t, clients[:2], "d", []float32{0, 0, 0, 1}, 10*time.Second)
 
-	// Restart node 3 as a brand-new process pointed at the SAME --data-dir. If this works,
-	// recovery came from disk: the process asks nothing of its peers before this test dials
-	// it directly and searches, and the process was started fresh with an empty in-memory
-	// HNSW graph that only the recovered Raft log could have repopulated.
+	// Restart node 3 as a new process on the same data directory, starting with an empty
+	// graph. It then has to serve the earlier vectors again. Nodes 1 and 2 are still
+	// running, so it could also catch up from them; ann.TestDurableNodeSurvivesRestart
+	// is the test that proves recovery from the node's own disk alone.
 	nodes[3] = &e2eNode{
 		id: 3, raftAddr: nodes[3].raftAddr, grpcAddr: nodes[3].grpcAddr,
 		dataDir: nodes[3].dataDir, binary: binary, peersFlag: peerParts,

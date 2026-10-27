@@ -5,16 +5,10 @@ import (
 	"time"
 )
 
-// TestBrandNewProcessJoinsLiveGroupAsLearnerThenVoter proves the exact scenario
-// TestJointTransitionCompletesAndFinalizesAutomatically's own doc comment names as NOT
-// covered there: "two brand-new nodes appearing from nothing," not two already-running
-// learner processes an existing 5-node Config already knew about from the start. Here,
-// node 4's *testHost is constructed only after nodes 1-3 have already elected a leader
-// and committed real entries -- its address exists nowhere in any of the other three
-// hosts' transports until AddPeer registers it, exactly the deployment-time gap
-// of provisioning a brand-new process and publishing its address. Without AddPeer, ProposeConfChange would still
-// succeed at the Raft membership layer, but every message to node 4 would fail with
-// "unknown peer address" and it could never actually catch up.
+// TestBrandNewProcessJoinsLiveGroupAsLearnerThenVoter adds a node that did not exist when
+// the group started. Node 4 is only created after nodes 1-3 have elected a leader and
+// committed entries, and the others do not know its address until AddPeer is called.
+// Without AddPeer, the config change would succeed but every message to node 4 would fail.
 func TestBrandNewProcessJoinsLiveGroupAsLearnerThenVoter(t *testing.T) {
 	ids := []NodeID{1, 2, 3}
 	addrs := map[NodeID]string{1: freeTCPAddr(t), 2: freeTCPAddr(t), 3: freeTCPAddr(t)}
@@ -66,9 +60,7 @@ func TestBrandNewProcessJoinsLiveGroupAsLearnerThenVoter(t *testing.T) {
 	// genuinely new process this deployment never addressed before.
 	for _, h := range hosts[:3] {
 		h.host.AddKnownPeer(fourID)
-		if err := h.host.AddPeer(fourID, fourAddr); err != nil {
-			t.Fatalf("node %d: AddPeer(4): %v", h.id, err)
-		}
+		h.host.AddPeer(fourID, fourAddr)
 	}
 
 	var leader *testHost

@@ -37,8 +37,8 @@ makes this a test of repeated dynamic splitting rather than one static cut.
 Checked with `Keys = {k1, k2, k3}`: **0 violations**, 5 distinct states, depth 3 (every
 key reachable down to a singleton range).
 
-**What this does NOT model:** concurrent splits racing each other, replica placement
-during a split, or HNSW graph repair. This
+**What this does NOT model:** concurrent splits racing each other, or replica placement
+during a split. This
 spec proves keyspace partition-invariance only.
 
 ## Running the checks

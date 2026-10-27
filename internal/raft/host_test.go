@@ -10,11 +10,9 @@ import (
 	"github.com/ashraf/consensa/internal/storage"
 )
 
-// This file is the test TCPTransport and Host never had: internal/raft/cluster_test.go
-// proves the pure protocol (Step/Tick/Ready) is correct, but nothing exercised the actual
-// production path -- real sockets, a real on-disk WAL via Persister, and a process-level
-// leader failure -- so a bug in the transport framing or the Host/Persister wiring could
-// pass every other test in the repo undetected. These tests close that gap.
+// These tests run Hosts over real TCP sockets with real on-disk storage. cluster_test.go
+// covers the protocol itself; these cover the wiring around it (message framing, saving to
+// disk, a node failing).
 
 // applyLog records committed entries per node, guarded by its own mutex because Host.Apply
 // is invoked from whichever goroutine is driving that host's Tick/Step at the time.
@@ -22,12 +20,6 @@ type applyLog struct {
 	mu      sync.Mutex
 	entries map[NodeID][][]byte
 }
-
-type discardTransport struct{}
-
-func (discardTransport) Addr() net.Addr     { return &net.TCPAddr{} }
-func (discardTransport) Send(Message) error { return nil }
-func (discardTransport) Close() error       { return nil }
 
 func newApplyLog() *applyLog { return &applyLog{entries: map[NodeID][][]byte{}} }
 
@@ -78,7 +70,12 @@ func TestHostDoesNotApplyInternalConfChangeEntries(t *testing.T) {
 	state.unstable = append(state.unstable, noop)
 	state.log.committed = state.log.lastIndex()
 	applied := 0
-	h := &Host{node: state, persister: NewPersister(db), transport: discardTransport{}, progress: make(chan struct{}), apply: func(Entry) error {
+	transport, err := ListenTCP(1, "127.0.0.1:0", nil, func(Message) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transport.Close()
+	h := &Host{node: state, persister: NewPersister(db), transport: transport, apply: func(Entry) error {
 		applied++
 		return nil
 	}}

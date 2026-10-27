@@ -7,25 +7,25 @@ import (
 	"github.com/ashraf/consensa/internal/vector"
 )
 
-// Mutation is the deterministic payload a Raft entry carries for one graph operation.
-// Replicas apply it in log order, so their graph topology does not depend on local timing.
+// Mutation is what a Raft log entry holds for the vector index: an insert or a delete.
+// Replicas apply them in log order, so they all build the same graph.
 type Mutation struct {
-	Operation string        `json:"operation"`
+	Operation string        `json:"operation"` // "insert" or "delete"
 	ID        string        `json:"id"`
-	Vector    vector.Vector `json:"vector,omitempty"`
+	Vector    vector.Vector `json:"vector,omitempty"` // only for insert
 }
 
-// EncodeMutation serializes a validated insertion for a Raft log entry.
+// EncodeMutation makes the log entry bytes for inserting (or replacing) a vector.
 func EncodeMutation(id string, v vector.Vector) ([]byte, error) {
 	return json.Marshal(Mutation{Operation: "insert", ID: id, Vector: v})
 }
 
-// EncodeDeleteMutation serializes a replicated graph deletion.
+// EncodeDeleteMutation makes the log entry bytes for deleting a vector.
 func EncodeDeleteMutation(id string) ([]byte, error) {
 	return json.Marshal(Mutation{Operation: "delete", ID: id})
 }
 
-// ApplyMutation decodes and applies one Raft-ordered graph mutation.
+// ApplyMutation decodes one log entry and applies it to the graph.
 func (h *HNSW) ApplyMutation(data []byte) error {
 	var m Mutation
 	if err := json.Unmarshal(data, &m); err != nil {

@@ -1,18 +1,14 @@
-"""Deterministic recall@k regression gate for the real Go HNSW index.
+"""Fails if the Go HNSW index's recall@10 drops below a committed baseline.
 
-A bare `recall >= threshold` assertion is a flake generator:
-HNSW's level assignment is randomized, so a fresh build's recall varies run to run unless
-everything about the run is pinned. This test pins the RNG seed, the dataset (size,
-dimension, cluster count), the query set, and the HNSW parameters, and compares against a
-COMMITTED baseline with a tolerance band -- fail on a drop below the band, only warn (not
-fail) on an unexplained improvement, since that usually means the ground truth broke
-rather than that the index got better.
+A plain "recall >= 0.95" check would be flaky, since HNSW picks node levels at random.
+This test fixes the seed, the dataset (size, dimension, clusters), the queries and the
+HNSW settings, then compares against a baseline with a tolerance band. A drop below the
+band fails. An unexplained rise only prints a warning, because it usually means the
+ground-truth code broke rather than the index improving.
 
-This config is deliberately small and NOT the number quoted in docs/benchmarks/04-ann.md
-as the recall@10 claim -- efSearch=12 here is chosen specifically because it sits below
-saturation (recall < 1.0) so an actual regression has room to show up as a number change,
-not just "still 1.0". The larger-scale, higher-efSearch numbers in the docs are the
-production-relevant claim; this is the tripwire.
+The settings are deliberately small and use efSearch=12, which is not the efSearch=64
+behind the 98.6% figure in docs/benchmarks/04-ann.md. At efSearch=12 recall is below 1.0,
+so a real regression shows up as a number change instead of "still 1.0".
 """
 
 import json
@@ -52,7 +48,7 @@ def _run_annbench(dataset_path: str, tmp_dir: str) -> dict:
     assert build.returncode == 0, f"building cmd/annbench failed:\n{build.stderr}"
 
     result = subprocess.run(
-        [binary, "-dataset", dataset_path, "-index", "hnsw", "-k", str(K), "-sweep", str(EF_SEARCH), "-seed", str(INDEX_SEED)],
+        [binary, "-dataset", dataset_path, "-k", str(K), "-sweep", str(EF_SEARCH), "-seed", str(INDEX_SEED)],
         capture_output=True, text=True,
     )
     assert result.returncode == 0, f"annbench failed:\n{result.stderr}"

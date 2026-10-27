@@ -1,4 +1,4 @@
-// Package server exposes Consensa's client-facing gRPC service. It validates untrusted
-// requests before passing them to the index and returns explicit gRPC errors rather than
-// allowing malformed vectors to reach storage or consensus code.
+// Package server is the gRPC service clients talk to. It checks each request (IDs,
+// vector length, no NaN) and returns proper gRPC errors before anything reaches the
+// index or Raft.
 package server

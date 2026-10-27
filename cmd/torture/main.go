@@ -1,13 +1,10 @@
-// Command torture drives a real internal/raft.Cluster under a fault schedule and prints a
-// real client-observable operation history as JSON, so the Python torture harness's
-// linearizability checker (harness/torture/checker/linearizability.py) can be run against
-// something that actually happened, instead of a fixed hand-written history.
+// Command torture runs a small Raft cluster (internal/raft.Cluster, all in one process)
+// under a schedule of faults and prints the reads and writes a client would have seen, as
+// JSON. The Python harness (harness/torture) reads that and checks the history is
+// linearizable, meaning it could have come from a single correct copy of the data.
 //
-// Before this existed, harness/torture/workload/register.py checked a hardcoded two-
-// operation history that never touched Go at all -- the seed and --nemesis flags in
-// harness/torture/cli.py generated a fault schedule but nothing ever applied it to
-// anything, so pass/fail was completely independent of both. This binary is what makes
-// the seed and the nemesis schedule actually matter.
+// The fault schedule comes in on stdin as JSON, produced from a seed by
+// harness/torture/nemesis.py, so the same seed always runs the same faults.
 package main
 
 import (
@@ -20,15 +17,14 @@ import (
 	"github.com/ashraf/consensa/internal/raft"
 )
 
-// fault mirrors harness/torture/nemesis.py's Fault dataclass field-for-field, so the same
-// JSON a Python-generated schedule produces decodes here without translation.
+// fault is one entry of the schedule: at Step, cut Target off from the network. It matches nemesis.py.
 type fault struct {
 	Step   int    `json:"step"`
 	Kind   string `json:"kind"`
 	Target int    `json:"target"`
 }
 
-// operation mirrors harness/torture/checker/linearizability.py's Operation dataclass.
+// operation is one read or write a client saw. It matches Operation in linearizability.py.
 type operation struct {
 	Invocation int     `json:"invocation"`
 	Response   int     `json:"response"`
@@ -37,6 +33,7 @@ type operation struct {
 	Result     *string `json:"result"`
 }
 
+// report is the JSON printed at the end.
 type report struct {
 	History []operation `json:"history"`
 }
@@ -65,9 +62,8 @@ func main() {
 		fatal(err)
 	}
 
-	// Elect an initial leader on a fully connected network before any fault fires -- a
-	// fault schedule targeting round 0 should test what happens to an ALREADY-WORKING
-	// cluster, not confound "never elected a leader" with "a fault broke something."
+	// Let the cluster elect a leader on a healthy network first, so faults hit a working
+	// cluster rather than one that never got started.
 	for i := 0; i < 3; i++ {
 		if err := cluster.TickFiltered(alwaysDeliver); err != nil {
 			fatal(err)
@@ -80,12 +76,9 @@ func main() {
 		deliver := alwaysDeliver
 		if f, ok := byStep[round]; ok {
 			target := raft.NodeID(f.Target%(*nodeCount)) + 1
-			// "partition" and "crash" are modeled identically here -- full isolation of
-			// the target node's messages for this one round -- which is a deliberate
-			// simplification, not an oversight:
-			// distinguishing a genuine crash (node also stops ticking, loses no state vs.
-			// keeps state) from a network partition (node keeps ticking, fully retains
-			// state) needs a richer fault model than this first pass builds.
+			// "partition" and "crash" are treated the same: the target node is cut off from
+			// every other node for this round. A real crash would also stop the node's
+			// clock, and that is not modeled here.
 			deliver = isolate(target)
 		}
 		if err := cluster.TickFiltered(deliver); err != nil {
@@ -96,42 +89,26 @@ func main() {
 		if !hasLeader {
 			continue
 		}
-		// A real client does not know whether the node it is talking to is currently
-		// isolated; modeling that means proposing through "the leader" even when it might
-		// be the fault's target this round, using the SAME filtered delivery so an
-		// isolated leader's proposal genuinely cannot reach a quorum, exactly like a real
-		// client's request would time out against a partitioned leader.
+		// Send the write through the leader even if the fault just cut it off, as a real
+		// client would. An isolated leader cannot reach a quorum, so its write must not commit.
 		value := fmt.Sprintf("v%d", round)
 		invokeAt := logical
 		respondAt := logical + 1
 		proposeErr := cluster.ProposeFiltered(leader, []byte(value), deliver)
 		logical += 2
-		// Propose returning nil means "this node still believes it is leader and appended
-		// the entry locally" -- NOT "a quorum committed it." An isolated leader keeps
-		// believing it is leader (that is exactly the zombie-leader scenario Raft's
-		// Election Safety property has to prevent) and Propose happily appends to its own
-		// log regardless of whether any message actually left the node. A real client only
-		// learns a write succeeded from a server-confirmed commit, so this driver checks
-		// the leader's own Applied() tail rather than trusting a nil error -- the first
-		// version of this tool trusted the nil error alone and recorded a write as
-		// "succeeded" even when it was invisible to every other replica, which was a bug in
-		// this test client's modeling, not a discovery about Consensa's Raft implementation.
+		// A nil error only means the leader added the entry to its own log. It does not
+		// mean a quorum committed it (an isolated leader still accepts proposals). So the
+		// write is only recorded if it shows up as applied on the leader.
 		if proposeErr == nil {
 			if applied := cluster.Applied(leader); len(applied) > 0 && string(applied[len(applied)-1]) == value {
 				history = append(history, operation{Invocation: invokeAt, Response: respondAt, Kind: "write", Value: &value})
 			}
-			// else: proposed but not confirmed committed this round -- a real client's
-			// request would still be in flight/timed out, so no operation is recorded,
-			// matching the "a real client does not fabricate success" rule above.
+			// Otherwise the write did not commit this round, so nothing is recorded.
 		}
 
-		// Read back through whatever this round's post-fault leader is (it may have
-		// changed as a result of the fault). The read's invocation deliberately overlaps
-		// the write's response instant rather than starting strictly after it, so the
-		// checker has genuine concurrency to resolve instead of a trivially sequential
-		// history -- an all-sequential history is linearizable by construction regardless
-		// of correctness, which would make this check as vacuous as the fixed stub it
-		// replaces.
+		// Read the latest applied value from whoever is leader now. The read starts at the
+		// instant the write finished, so the two overlap and the checker has real
+		// ordering questions to answer (a strictly sequential history is always linearizable).
 		if readLeader, ok := cluster.Leader(); ok {
 			applied := cluster.Applied(readLeader)
 			var result *string
@@ -151,12 +128,15 @@ func main() {
 	}
 }
 
+// alwaysDeliver lets every message through.
 func alwaysDeliver(raft.Message) bool { return true }
 
+// isolate drops every message to or from target.
 func isolate(target raft.NodeID) func(raft.Message) bool {
 	return func(m raft.Message) bool { return m.From != target && m.To != target }
 }
 
+// fatal prints the error and exits.
 func fatal(err error) {
 	fmt.Fprintf(os.Stderr, "torture: %v\n", err)
 	os.Exit(1)

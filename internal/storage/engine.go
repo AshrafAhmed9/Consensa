@@ -11,45 +11,35 @@ import (
 	"sync"
 )
 
-// ErrNotFound distinguishes an absent historical version from a present tombstone.
+// ErrNotFound means the key has never been written.
 var ErrNotFound = errors.New("storage: key not found")
 
-// Options controls durability and the memory threshold. SyncEvery=1 fsyncs every write;
-// larger values trade acknowledged-write durability for throughput and are explicit.
+// Options configures a DB.
 type Options struct {
-	Dir                string
-	SyncEvery          int
-	MemtableMaxEntries int
-	CompactionTrigger  int
+	Dir                string // directory for the files (created if missing)
+	SyncEvery          int    // fsync the WAL every N writes (1 = every write); 0 = only when Sync is called
+	MemtableMaxEntries int    // flush the in-memory map to a table after this many keys (default 1024)
+	CompactionTrigger  int    // merge tables once there are this many (default 4)
 }
 
-// Engine is the storage contract consumed by upper layers. Its timestamp argument makes
-// historical visibility explicit.
-type Engine interface {
-	Put(key []byte, ts HLC, value []byte) error
-	Get(key []byte, ts HLC) ([]byte, error)
-	Delete(key []byte, ts HLC) error
-	Scan(start, end []byte, ts HLC) Iterator
-	Flush() error
-	Close() error
+// KV is a key and its value, as returned by Scan.
+type KV struct {
+	Key, Value []byte
 }
 
-// DB is a single-node MVCC LSM store. Its mutex makes the public API safe for callers,
-// though consensus—not this mutex—will eventually define distributed write ordering.
+// DB is the key-value store. A mutex makes it safe to share between goroutines.
 type DB struct {
 	mu                            sync.RWMutex
 	dir                           string
 	wal                           *wal
-	mem                           *memtable
-	tables                        []*sstable
-	generation                    uint64
+	mem                           *skiplist  // recent writes not yet in a table
+	tables                        []*sstable // newest first
+	generation                    uint64     // number of the newest table file
 	maxEntries, compactionTrigger int
 	closed                        bool
 }
 
-var _ Engine = (*DB)(nil)
-
-// Open recovers an existing database before it accepts any request.
+// Open loads the tables, replays the WAL, and returns a ready DB.
 func Open(o Options) (*DB, error) {
 	if o.Dir == "" {
 		return nil, errors.New("storage: Dir is required")
@@ -63,20 +53,20 @@ func Open(o Options) (*DB, error) {
 	if err := os.MkdirAll(o.Dir, 0700); err != nil {
 		return nil, err
 	}
-	d := &DB{dir: o.Dir, mem: newMemtable(), maxEntries: o.MemtableMaxEntries, compactionTrigger: o.CompactionTrigger}
+	d := &DB{dir: o.Dir, mem: newSkiplist(), maxEntries: o.MemtableMaxEntries, compactionTrigger: o.CompactionTrigger}
 	paths, err := filepath.Glob(filepath.Join(o.Dir, "sst-*.sst"))
 	if err != nil {
 		return nil, err
 	}
-	sort.Strings(paths)
+	sort.Strings(paths) // names sort oldest to newest
 	for _, p := range paths {
-		t, e := openSSTable(p)
-		if e != nil {
-			return nil, e
+		t, err := openSSTable(p)
+		if err != nil {
+			return nil, err
 		}
 		d.tables = append([]*sstable{t}, d.tables...)
-		n := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), "sst-"), ".sst")
-		if g, e := strconv.ParseUint(n, 10, 64); e == nil && g > d.generation {
+		name := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), "sst-"), ".sst")
+		if g, err := strconv.ParseUint(name, 10, 64); err == nil && g > d.generation {
 			d.generation = g
 		}
 	}
@@ -84,20 +74,15 @@ func Open(o Options) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = d.wal.replay(func(r walRecord) { d.mem.put(r.key, r.value, r.tombstone) }); err != nil {
+	if err = d.wal.replay(func(r record) { d.mem.put(r.key, r.value) }); err != nil {
 		_ = d.wal.close()
 		return nil, err
 	}
 	return d, nil
 }
 
-// Put writes a version. The WAL precedes memory so recovery cannot expose an acknowledged
-// mutation that existed only in RAM.
-func (d *DB) Put(key []byte, ts HLC, value []byte) error { return d.write(key, ts, value, false) }
-
-// Delete writes a tombstone version; absence and deletion must remain distinct for MVCC.
-func (d *DB) Delete(key []byte, ts HLC) error { return d.write(key, ts, nil, true) }
-func (d *DB) write(key []byte, ts HLC, value []byte, tombstone bool) error {
+// Put writes a value. It goes to the WAL first, so a crash cannot lose an acknowledged write.
+func (d *DB) Put(key, value []byte) error {
 	if len(key) == 0 {
 		return errors.New("storage: empty key")
 	}
@@ -106,95 +91,95 @@ func (d *DB) write(key []byte, ts HLC, value []byte, tombstone bool) error {
 	if d.closed {
 		return errors.New("storage: closed")
 	}
-	k := encodeMVCCKey(MVCCKey{Key: key, Timestamp: ts})
-	if err := d.wal.append(walRecord{key: k, value: value, tombstone: tombstone}); err != nil {
+	if err := d.wal.append(record{key: key, value: value}); err != nil {
 		return err
 	}
-	d.mem.put(k, value, tombstone)
-	if d.mem.list.size >= d.maxEntries {
+	d.mem.put(key, value)
+	if d.mem.size >= d.maxEntries {
 		return d.flushLocked()
 	}
 	return nil
 }
 
-// Get returns the newest version not later than ts.
-func (d *DB) Get(key []byte, ts HLC) ([]byte, error) {
+// Get returns the value for key, or ErrNotFound. It checks the newest data first.
+func (d *DB) Get(key []byte) ([]byte, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.closed {
 		return nil, errors.New("storage: closed")
 	}
-	for _, r := range d.allRecordsNewest() {
-		mk, e := decodeMVCCKey(r.key)
-		if e != nil {
-			return nil, e
-		}
-		if sameUserKey(mk.Key, key) && mk.Timestamp.compare(ts) <= 0 {
-			if r.tombstone {
-				return nil, ErrNotFound
-			}
-			return append([]byte(nil), r.value...), nil
+	if v, ok := d.mem.get(key); ok {
+		return append([]byte(nil), v...), nil
+	}
+	for _, t := range d.tables {
+		if v, ok := t.get(key); ok {
+			return append([]byte(nil), v...), nil
 		}
 	}
 	return nil, ErrNotFound
 }
 
-// Iterator visits a stable scan snapshot in key order.
-type Iterator interface {
-	Next() bool
-	Key() []byte
-	Value() []byte
-	Err() error
-	Close() error
-}
-
-// Scan returns each newest visible user-key version in [start,end).
-func (d *DB) Scan(start, end []byte, ts HLC) Iterator {
+// Scan returns every key in [start, end) with its value, in key order.
+// An empty end means "to the end".
+func (d *DB) Scan(start, end []byte) []KV {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	seen := map[string]bool{}
-	var out []record
-	for _, r := range d.allRecordsNewest() {
-		mk, e := decodeMVCCKey(r.key)
-		if e != nil {
-			continue
-		}
-		if bytes.Compare(mk.Key, start) < 0 || (len(end) > 0 && bytes.Compare(mk.Key, end) >= 0) || mk.Timestamp.compare(ts) > 0 || seen[string(mk.Key)] {
-			continue
-		}
-		seen[string(mk.Key)] = true
-		if !r.tombstone {
-			out = append(out, record{key: mk.Key, value: r.value})
+	latest := map[string][]byte{}
+	for i := len(d.tables) - 1; i >= 0; i-- { // oldest table first, so newer values overwrite
+		for _, r := range d.tables[i].records {
+			latest[string(r.key)] = r.value
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i].key, out[j].key) < 0 })
-	return &sliceIterator{records: out, index: -1}
-}
-func (d *DB) allRecordsNewest() []record {
-	out := d.mem.list.all()
-	for _, t := range d.tables {
-		out = append(out, t.records...)
+	for _, r := range d.mem.all() {
+		latest[string(r.key)] = r.value
 	}
+	var out []KV
+	for k, v := range latest {
+		key := []byte(k)
+		if bytes.Compare(key, start) >= 0 && (len(end) == 0 || bytes.Compare(key, end) < 0) {
+			out = append(out, KV{Key: key, Value: append([]byte(nil), v...)})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i].Key, out[j].Key) < 0 })
 	return out
 }
 
-// Flush writes the current memtable into a durable immutable table and starts a fresh WAL.
-func (d *DB) Flush() error { d.mu.Lock(); defer d.mu.Unlock(); return d.flushLocked() }
-func (d *DB) flushLocked() error {
-	rs := d.mem.list.all()
-	if len(rs) == 0 {
-		return d.wal.sync()
+// Sync forces all writes so far onto disk (an fsync of the WAL). Use it with SyncEvery 0
+// to make a batch of writes durable with one fsync instead of one per write.
+func (d *DB) Sync() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return errors.New("storage: closed")
 	}
+	return d.wal.sync()
+}
+
+// Flush writes the in-memory data out to a new table and starts a fresh WAL.
+func (d *DB) Flush() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.flushLocked()
+}
+
+// flushLocked writes the in-memory map to a new table and starts a fresh WAL.
+// The caller must hold d.mu.
+func (d *DB) flushLocked() error {
+	records := d.mem.all()
 	if err := d.wal.sync(); err != nil {
 		return err
 	}
+	if len(records) == 0 {
+		return nil
+	}
 	d.generation++
-	t, err := writeSSTable(d.dir, d.generation, rs)
+	t, err := writeSSTable(d.dir, d.generation, records)
 	if err != nil {
 		return err
 	}
 	d.tables = append([]*sstable{t}, d.tables...)
-	d.mem = newMemtable()
+	d.mem = newSkiplist()
+	// The table now holds everything the WAL did, so the WAL can be thrown away.
 	if err = d.wal.close(); err != nil {
 		return err
 	}
@@ -208,7 +193,7 @@ func (d *DB) flushLocked() error {
 	return d.compact()
 }
 
-// Close flushes buffered writes; callers must not use DB after Close.
+// Close flushes remaining writes. The DB must not be used afterwards.
 func (d *DB) Close() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -221,25 +206,3 @@ func (d *DB) Close() error {
 	d.closed = true
 	return d.wal.close()
 }
-
-type sliceIterator struct {
-	records []record
-	index   int
-	err     error
-}
-
-func (i *sliceIterator) Next() bool { i.index++; return i.index < len(i.records) }
-func (i *sliceIterator) Key() []byte {
-	if i.index < 0 || i.index >= len(i.records) {
-		return nil
-	}
-	return append([]byte(nil), i.records[i.index].key...)
-}
-func (i *sliceIterator) Value() []byte {
-	if i.index < 0 || i.index >= len(i.records) {
-		return nil
-	}
-	return append([]byte(nil), i.records[i.index].value...)
-}
-func (i *sliceIterator) Err() error   { return i.err }
-func (i *sliceIterator) Close() error { return nil }

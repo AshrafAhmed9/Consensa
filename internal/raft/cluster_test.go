@@ -77,10 +77,9 @@ func TestPartitionedLeaderCannotCommit(t *testing.T) {
 	}
 }
 
-// TestFilteredMethodsMatchInPackageIsolation proves TickFiltered/ProposeFiltered (the
-// exported surface an external fault-injection driver like cmd/torture must use, since it
-// cannot reach c.nodes directly) produce the identical isolation behavior as the
-// in-package DeliverFiltered pattern TestPartitionedLeaderCannotCommit above uses.
+// TestFilteredMethodsMatchInPackageIsolation checks that TickFiltered and ProposeFiltered
+// (what cmd/torture uses from outside the package) isolate a node exactly the way the
+// in-package DeliverFiltered call in TestPartitionedLeaderCannotCommit does.
 func TestFilteredMethodsMatchInPackageIsolation(t *testing.T) {
 	c, err := NewCluster([]NodeID{1, 2, 3})
 	if err != nil {
@@ -112,14 +111,10 @@ func TestFilteredMethodsMatchInPackageIsolation(t *testing.T) {
 	}
 }
 
-// TestLeaderPrefersHighestTermDuringSustainedIsolation proves Leader() cannot report a
-// stale "zombie leader" once the reachable majority has elected a real replacement at a
-// higher term. Before this fix, Leader() picked among role==Leader nodes using Go's
-// undefined map iteration order, so during a sustained isolation it could return either
-// the old, isolated leader (term N) or the new one the majority actually elected
-// (term > N) depending on iteration order alone -- corrupting anything built on top of
-// it (cmd/torture found this at ~15% of seeds once sustained-window faults were added;
-// .
+// TestLeaderPrefersHighestTermDuringSustainedIsolation proves Leader() does not report an
+// old isolated leader once the rest of the cluster has elected a new one at a higher
+// term. Leader() used to pick among the nodes calling themselves leader in random map
+// order, so it could flip between the old and new leader.
 func TestLeaderPrefersHighestTermDuringSustainedIsolation(t *testing.T) {
 	c, err := NewCluster([]NodeID{1, 2, 3, 4, 5})
 	if err != nil {
@@ -159,21 +154,14 @@ func TestLeaderPrefersHighestTermDuringSustainedIsolation(t *testing.T) {
 	}
 }
 
-// TestAsymmetricPartitionDisruptsHealthyLeader documents a real, unfixed gap: pre-vote
-// (Ongaro thesis §9.6) stops a RECONNECTING node's inflated term from disrupting a
-// healthy cluster, but does nothing for a node that is PERSISTENTLY cut off from the
-// leader alone while still fully connected to every other follower. handleVote and
-// handlePreVote (election.go) grant a vote based only on log freshness -- neither checks
-// whether the responder currently has a healthy, reachable leader (etcd calls this check
-// CheckQuorum; this implementation does not have it). So a follower those OTHER
-// followers can still reach wins real elections against them and repeatedly displaces
-// the actual leader, purely because they have no way to know it's still alive.
-//
-// This is why the torture harness could not distinguish a correctly-implemented
-// pre-vote from a deliberately weakened one every fault
-// it can generate is a full bidirectional isolation, which can never produce this
-// scenario, and this scenario doesn't distinguish the two implementations anyway --
-// proven below by running it against the real, unmodified election path.
+// TestAsymmetricPartitionDisruptsHealthyLeader documents a known gap. Pre-vote stops a
+// node that was cut off and then reconnects from disrupting the cluster. It does not help
+// when one follower is permanently cut off from the leader only, while still reaching
+// every other follower. Votes are granted based only on how up to date the candidate's
+// log is, and nothing checks whether the voter still has a working leader (etcd calls
+// that check CheckQuorum, which is not implemented here). So that follower keeps winning
+// elections and displacing the healthy leader. The torture harness cannot produce this
+// case, because its faults always cut a node off from everyone.
 func TestAsymmetricPartitionDisruptsHealthyLeader(t *testing.T) {
 	c, err := NewCluster([]NodeID{1, 2, 3, 4, 5})
 	if err != nil {

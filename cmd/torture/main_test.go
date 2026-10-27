@@ -7,10 +7,8 @@ import (
 	"testing"
 )
 
-// This is a Go-level test of cmd/torture itself, not just an exercise of it through the
-// Python glue in harness/torture/workload/register.py -- if the JSON schema drifted from
-// what Python expects, or a fault schedule crashed the binary outright, this test catches
-// it without needing the Python toolchain at all.
+// These tests run the torture binary directly, without Python. They catch a changed JSON
+// format or a crash on some fault schedule.
 
 func buildTortureBinary(t *testing.T) string {
 	t.Helper()
@@ -22,11 +20,9 @@ func buildTortureBinary(t *testing.T) string {
 	return bin
 }
 
-// TestTortureProducesValidHistory runs the binary with no faults at all -- a healthy,
-// fully-connected cluster -- and asserts the resulting history parses under the schema
-// harness/torture/checker/linearizability.py's Operation dataclass expects, and is
-// self-consistent (every write's value appears as some read's result, since with zero
-// faults every proposal should commit and be visible).
+// TestTortureProducesValidHistory runs with no faults and checks the output has the
+// shape the Python checker expects, with both reads and writes, and that a fault-free
+// read always returns a value.
 func TestTortureProducesValidHistory(t *testing.T) {
 	bin := buildTortureBinary(t)
 	cmd := exec.Command(bin, "-nodes", "3", "-rounds", "15")
@@ -77,15 +73,11 @@ func TestTortureProducesValidHistory(t *testing.T) {
 	}
 }
 
-// TestTortureIsolatesTargetNode proves a targeted fault actually changes recorded
-// behavior compared to the fault-free case above -- if this ever stopped being true, the
-// fault injection would be silently decorative the same way the pre-Go-driver
-// register.run() used to be.
-func TestTortureIsolatesTargetNode(t *testing.T) {
+// TestTortureRunsWithFaults checks that the binary accepts a fault schedule in the same
+// JSON shape nemesis.py produces, finishes, and prints valid JSON. It does not check
+// what the faults did to the history; the Python linearizability check does that.
+func TestTortureRunsWithFaults(t *testing.T) {
 	bin := buildTortureBinary(t)
-	// Shaped exactly like harness/torture/nemesis.py's Fault.__dict__ output -- "kind" is
-	// included even though cmd/torture currently treats every kind identically (see
-	// main.go's isolate() comment), because that is the real wire format register.py sends.
 	schedule, err := json.Marshal([]map[string]any{
 		{"step": 3, "kind": "partition", "target": 0},
 		{"step": 4, "kind": "partition", "target": 0},
@@ -94,7 +86,6 @@ func TestTortureIsolatesTargetNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	cmd := exec.Command(bin, "-nodes", "3", "-rounds", "15")
 	cmd.Stdin = bytes.NewReader(schedule)
 	out, err := cmd.Output()
@@ -104,6 +95,4 @@ func TestTortureIsolatesTargetNode(t *testing.T) {
 	if !json.Valid(out) {
 		t.Fatalf("output is not valid JSON: %s", out)
 	}
-	// The precise assertion here is deliberately weak: it only checks the run completes
-	// and produces a well-formed history under an active fault, not a specific outcome
 }

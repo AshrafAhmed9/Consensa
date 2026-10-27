@@ -6,98 +6,84 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 )
 
-type record struct {
-	key, value []byte
-	tombstone  bool
-}
-
-// sstable is immutable once published, which lets readers use it without coordination
-// with a future compaction. Its sparse index records the first key in each ~4 KiB block.
+// sstable is a sorted, immutable table of records, saved as one file. It is read fully
+// into memory when opened, which keeps lookups simple (a binary search).
+//
+// File format: for each record, 4-byte key length, 4-byte value length, key, value.
 type sstable struct {
 	path    string
-	records []record
+	records []record // sorted by key
 }
 
+// writeSSTable saves sorted records as generation number "generation". Higher
+// generations are newer. It returns nil if there are no records.
 func writeSSTable(dir string, generation uint64, records []record) (*sstable, error) {
 	if len(records) == 0 {
 		return nil, nil
 	}
-	p := filepath.Join(dir, "sst-"+formatGeneration(generation)+".sst")
-	// Written to a temp file and renamed into place rather than truncated in place: a
-	// process killed mid-write (e.g. SIGTERM, which this binary does not currently trap --
-	// see cmd/consensa/main.go) would otherwise leave a torn, unparseable file at the final
-	// path, since openSSTable has no way to tell a genuinely corrupt table from one that was
-	// simply interrupted partway through writing. Renaming a fully-synced temp file into
-	// place is atomic on the same filesystem, so a kill mid-write leaves either the complete
-	// old generation (rename never happened) or the complete new one -- never a partial file
-	// -- matching this engine's own WAL-then-flush durability model.
+	p := filepath.Join(dir, fmt.Sprintf("sst-%020d.sst", generation))
+	// Write to a temporary file and rename it into place. A crash mid-write then leaves
+	// no half-written table, because a rename is all-or-nothing.
 	tmp := p + ".tmp"
-	f, e := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
-	if e != nil {
-		return nil, e
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return nil, err
 	}
-	// No deferred Close: every path below either closes f explicitly before Rename (the
-	// success path) or returns straight from a write/Sync error, in which case f is left
-	// open and the process is expected to exit via the caller's fatal() -- matching this
-	// function's pre-existing error-handling level (no cleanup-on-error elsewhere in this
-	// file either) rather than adding asymmetric handling only here.
 	for _, r := range records {
-		header := make([]byte, 9)
-		if r.tombstone {
-			header[0] = 1
-		}
-		binary.BigEndian.PutUint32(header[1:5], uint32(len(r.key)))
-		binary.BigEndian.PutUint32(header[5:9], uint32(len(r.value)))
-		if _, e = f.Write(header); e != nil {
-			return nil, e
-		}
-		if _, e = f.Write(r.key); e != nil {
-			return nil, e
-		}
-		if _, e = f.Write(r.value); e != nil {
-			return nil, e
+		header := make([]byte, 8)
+		binary.BigEndian.PutUint32(header[:4], uint32(len(r.key)))
+		binary.BigEndian.PutUint32(header[4:], uint32(len(r.value)))
+		for _, chunk := range [][]byte{header, r.key, r.value} {
+			if _, err = f.Write(chunk); err != nil {
+				_ = f.Close()
+				return nil, err
+			}
 		}
 	}
-	if e = f.Sync(); e != nil {
-		return nil, e
+	if err = f.Sync(); err != nil {
+		_ = f.Close()
+		return nil, err
 	}
-	if e = f.Close(); e != nil {
-		return nil, e
+	if err = f.Close(); err != nil {
+		return nil, err
 	}
-	if e = os.Rename(tmp, p); e != nil {
-		return nil, e
+	if err = os.Rename(tmp, p); err != nil {
+		return nil, err
 	}
-	return &sstable{path: p, records: cloneRecords(records)}, nil
+	return &sstable{path: p, records: records}, nil
 }
+
+// openSSTable loads a table file.
 func openSSTable(path string) (*sstable, error) {
-	data, e := os.ReadFile(path)
-	if e != nil {
-		return nil, e
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
 	}
-	var rs []record
+	var records []record
 	for len(data) > 0 {
-		if len(data) < 9 {
+		if len(data) < 8 {
 			return nil, errors.New("storage: truncated SSTable")
 		}
-		t := data[0] == 1
-		k := int(binary.BigEndian.Uint32(data[1:5]))
-		v := int(binary.BigEndian.Uint32(data[5:9]))
-		data = data[9:]
-		if k < 0 || v < 0 || k+v > len(data) {
+		k := int(binary.BigEndian.Uint32(data[:4]))
+		v := int(binary.BigEndian.Uint32(data[4:8]))
+		data = data[8:]
+		if k+v > len(data) {
 			return nil, errors.New("storage: invalid SSTable record")
 		}
-		rs = append(rs, record{key: append([]byte(nil), data[:k]...), value: append([]byte(nil), data[k:k+v]...), tombstone: t})
+		records = append(records, record{key: append([]byte(nil), data[:k]...), value: append([]byte(nil), data[k:k+v]...)})
 		data = data[k+v:]
 	}
-	return &sstable{path: path, records: rs}, nil
+	return &sstable{path: path, records: records}, nil
 }
-func cloneRecords(in []record) []record {
-	out := make([]record, len(in))
-	for i, r := range in {
-		out[i] = record{key: append([]byte(nil), r.key...), value: append([]byte(nil), r.value...), tombstone: r.tombstone}
+
+// get looks up a key with a binary search.
+func (t *sstable) get(key []byte) ([]byte, bool) {
+	i := sort.Search(len(t.records), func(i int) bool { return string(t.records[i].key) >= string(key) })
+	if i < len(t.records) && string(t.records[i].key) == string(key) {
+		return t.records[i].value, true
 	}
-	return out
+	return nil, false
 }
-func formatGeneration(n uint64) string { return fmt.Sprintf("%020d", n) }

@@ -1,52 +1,50 @@
 package raft
 
-// NodeID identifies a voter in a Raft group.
+// NodeID identifies a node in a Raft group.
 type NodeID uint64
 
-// Role is the replica's election state.
+// Role is what a node is currently doing in the group.
 type Role uint8
 
-// Follower, Candidate, and Leader are Role's three possible values, in the order a
-// replica normally passes through them on its way to (or back down from) leadership.
+// A node starts as a Follower, becomes a Candidate when it asks for votes, and becomes
+// Leader if it wins.
 const (
 	Follower Role = iota
 	Candidate
 	Leader
 )
 
-// Entry is one replicated state-machine command. Index zero is a permanent sentinel.
+// Entry is one item in the replicated log. Index 0 is a placeholder.
 type Entry struct {
 	Index, Term uint64
 	Data        []byte
 }
 
-// HardState is the crash-durable portion of a node. It must reach disk before a message
-// caused by it reaches the network, otherwise a reboot can contradict an acknowledged vote.
+// HardState is the part of a node's state that must be saved to disk before it sends any
+// message that depends on it. Otherwise a restart could contradict a vote it already gave.
 type HardState struct{ Term, Vote, Commit uint64 }
 
-// ConfState is the Raft membership state captured with a Snapshot. A snapshot discards
-// the log entries that established its configuration, so treating membership as only
-// log-derived would make a restored replica silently return to its startup configuration.
-// Old must be non-empty when a snapshot carries configuration; an empty ConfState denotes
-// a legacy snapshot and leaves the configured initial membership in effect.
+// ConfState is the voter configuration saved inside a snapshot. A snapshot throws away the
+// log entries that set the configuration, so the configuration has to travel with it.
+// An empty ConfState means "no configuration recorded" and keeps the startup one.
 type ConfState struct {
 	Old, New []NodeID
 	Joint    bool
 }
 
-// Snapshot replaces all log entries through Index with application state and the
-// membership state effective at that index.
+// Snapshot stands in for every log entry up to Index: the application state at that
+// point, plus the voter configuration then.
 type Snapshot struct {
 	Index, Term uint64
 	Data        []byte
 	ConfState   ConfState
 }
 
-// MessageType enumerates Raft RPCs plus local proposal messages.
+// MessageType is the kind of message nodes send each other.
 type MessageType uint8
 
-// MsgPreVote through MsgSnapshot are MessageType's values: the pre-vote and real-vote
-// request/response pairs, log replication and its response, and snapshot installation.
+// The pre-vote and vote requests and replies, log replication and its reply, and
+// snapshot installation.
 const (
 	MsgPreVote MessageType = iota
 	MsgPreVoteResp
@@ -57,8 +55,7 @@ const (
 	MsgSnapshot
 )
 
-// Message is a wire-independent Raft RPC. Its slice fields are copied on receipt so the
-// caller may reuse buffers immediately.
+// Message is one message between nodes. It does not depend on the network used to send it.
 type Message struct {
 	Type                         MessageType
 	From, To                     NodeID
@@ -68,20 +65,14 @@ type Message struct {
 	Snapshot                     Snapshot
 }
 
-// Config defines a Raft group's initial peer universe. Election ticks should be several
-// heartbeats to avoid stable leaders being replaced by ordinary heartbeat jitter.
+// Config is the starting setup of a node. The election timeout should be several
+// heartbeats, so normal heartbeat jitter does not trigger elections.
 type Config struct {
 	ID    NodeID
 	Peers []NodeID
-	// Learners are members of Peers that receive log replication (so they can catch up
-	// before being promoted to a full voter) but never vote and are never counted toward
-	// quorum -- Raft's answer to a problem with adding
-	// a brand-new, empty replica directly as a voter temporarily WEAKENS fault tolerance
-	// (the cluster now needs a majority that includes a replica that has nothing yet),
-	// where adding it as a learner first does not, since quorum() never counts it. Every
-	// ID in Learners must also appear in Peers. A live reconfiguration may promote an
-	// existing learner or change voters, but cannot add an ID outside this transport-known
-	// peer universe.
+	// Learners are nodes in Peers that receive the log but do not vote. A new, empty node
+	// joins as a learner first so it can catch up without weakening fault tolerance, then
+	// is promoted to voter. Every learner must also be listed in Peers.
 	Learners                    []NodeID
 	ElectionTick, HeartbeatTick int
 }
