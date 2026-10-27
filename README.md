@@ -8,6 +8,48 @@ vector search is an HNSW index written from scratch, and clients talk to it over
 A client upserts a vector. A majority of replicas log it durably through Raft, then every
 replica applies it to its own HNSW graph. Search reads the local graph.
 
+```mermaid
+flowchart LR
+    C(["Client"])
+
+    subgraph L["Node 1 · leader"]
+        direction TB
+        A1["gRPC<br/>Upsert · Search · Delete · Status"]
+        R1["Raft"]
+        W1[("Log on disk")]
+        H1["HNSW graph"]
+        A1 -->|write| R1 --> W1
+        W1 -->|"committed"| H1
+        A1 -.->|search| H1
+    end
+
+    subgraph F2["Node 2 · follower"]
+        direction TB
+        R2["Raft"] --> W2[("Log on disk")] -->|"committed"| H2["HNSW graph"]
+    end
+
+    subgraph F3["Node 3 · follower"]
+        direction TB
+        R3["Raft"] --> W3[("Log on disk")] -->|"committed"| H3["HNSW graph"]
+    end
+
+    C ==>|"gRPC"| A1
+    R1 <==>|"replicate over TCP<br/>majority = committed"| R2
+    R1 <==>|"replicate over TCP"| R3
+
+    classDef client fill:#fef3c7,stroke:#d97706,color:#78350f
+    classDef raft fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef disk fill:#e5e7eb,stroke:#6b7280,color:#111827
+    classDef index fill:#dcfce7,stroke:#16a34a,color:#14532d
+    class C client
+    class R1,R2,R3 raft
+    class W1,W2,W3 disk
+    class H1,H2,H3,A1 index
+```
+
+Writes go to the leader and need a majority to commit. Every node keeps its own copy of
+the index, so a search can be answered by any node.
+
 ## What's in here
 
 | Path | What it is |
