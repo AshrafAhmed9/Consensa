@@ -66,12 +66,29 @@ can never both win the same term (quorum intersection). `specs/split.tla` checks
 repeated range splits never leave a key unowned or owned twice. (The server does not shard
 yet, so that one is a model only.) Both are small models of
 one property each; `specs/README.md` says what they leave out. Run with
-`make -C specs check TLA_JAR=/path/to/tla2tools.jar`.
+`make -C specs check` (needs `java` and `specs/tla2tools.jar`).
 
 **Search quality.** On 5,000 synthetic 128-dimension vectors (20 Gaussian clusters),
 HNSW at efSearch=64 returns 98.6% of the true top-10 with a 156 µs mean search, measured
-against exact brute-force search. The data is synthetic, not a real embedding set. Method
-and the full sweep are in `docs/benchmarks/04-ann.md`.
+against exact brute-force search. The ground truth is computed in Python
+(`harness/bench/recall.py`), not by the Go code being tested. The data is synthetic, not a
+real embedding set. Search time varies from run to run (about 140 to 190 µs on the same
+machine); recall does not.
+
+```sh
+python3 harness/bench/generate_dataset.py --num-vectors 5000 --dimension 128 \
+    --num-queries 200 --num-clusters 20 --seed 1 --out /tmp/ann_dataset.json
+python3 harness/bench/run_recall_benchmark.py --dataset /tmp/ann_dataset.json --repo-root .
+```
+
+| efSearch | recall@10 | Mean search |
+| ---: | ---: | ---: |
+| 16 | 0.896 | 52.1 µs |
+| 32 | 0.966 | 92.3 µs |
+| 64 | 0.986 | 156.3 µs |
+| 128 | 1.000 | 302.4 µs |
+
+Measured on an Apple M5, Go 1.26.
 
 ## Known limits
 
