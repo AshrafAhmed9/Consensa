@@ -25,8 +25,5 @@ python3 harness/bench/run_recall_benchmark.py --dataset /tmp/ann_dataset.json --
 | 64 | 0.986 | 156.3 µs | 2,515.8 ms |
 | 128 | 1.000 | 302.4 µs | 2,515.8 ms |
 
-`harness/bench/test_recall_regression.py` pins the seed, dataset shape and HNSW parameters
-and fails if recall@10 drops below a committed baseline.
-
 These numbers are from synthetic data. Running the same harness on a real embedding set
 (SIFT-1M or similar) has not been done.

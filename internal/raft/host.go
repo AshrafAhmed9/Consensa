@@ -150,7 +150,7 @@ func (h *Host) Close() error { return h.transport.Close() }
 // committed entries, then tell the node it is done. The caller must hold h.mu.
 func (h *Host) driveLocked() error {
 	ready := h.node.Ready()
-	if len(ready.Entries) == 0 && len(ready.Messages) == 0 && len(ready.CommittedEntries) == 0 && ready.Snapshot.Index == 0 && ready.HardState == h.node.(*node).lastHard {
+	if len(ready.Entries) == 0 && len(ready.Messages) == 0 && len(ready.CommittedEntries) == 0 && ready.HardState == h.node.(*node).lastHard {
 		return nil // nothing to do
 	}
 	// Save before sending: a peer must never see a message that depends on state we

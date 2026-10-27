@@ -10,7 +10,7 @@ import (
 )
 
 func BenchmarkSequentialWrite(b *testing.B) {
-	db, err := Open(Options{Dir: b.TempDir(), SyncEvery: 1, MemtableMaxEntries: 4096})
+	db, err := Open(Options{Dir: b.TempDir(), SyncEvery: 1})
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -24,11 +24,10 @@ func BenchmarkSequentialWrite(b *testing.B) {
 }
 
 // TestRandomOperationsAgainstModel writes random values and checks every key against a
-// plain Go map after each write, closing and reopening the DB now and then. The tiny
-// memtable forces many flushes and compactions along the way.
+// plain Go map after each write, closing and reopening the DB now and then.
 func TestRandomOperationsAgainstModel(t *testing.T) {
 	dir := t.TempDir()
-	d, err := Open(Options{Dir: dir, SyncEvery: 1, MemtableMaxEntries: 7})
+	d, err := Open(Options{Dir: dir, SyncEvery: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +50,7 @@ func TestRandomOperationsAgainstModel(t *testing.T) {
 			if err := d.Close(); err != nil {
 				t.Fatal(err)
 			}
-			if d, err = Open(Options{Dir: dir, SyncEvery: 1, MemtableMaxEntries: 7}); err != nil {
+			if d, err = Open(Options{Dir: dir, SyncEvery: 1}); err != nil {
 				t.Fatal(err)
 			}
 		}

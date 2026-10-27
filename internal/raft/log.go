@@ -7,7 +7,6 @@ import "errors"
 type raftLog struct {
 	entries            []Entry
 	committed, applied uint64 // highest index known committed / handed to the state machine
-	snapshot           Snapshot
 }
 
 func newLog() *raftLog { return &raftLog{entries: []Entry{{}}} }
@@ -20,9 +19,6 @@ func (l *raftLog) lastIndex() uint64 { return l.entries[len(l.entries)-1].Index 
 // at position i - entries[0].Index. That makes this a direct lookup instead of a scan,
 // which matters because it runs on every append response, including heartbeats.
 func (l *raftLog) term(i uint64) (uint64, bool) {
-	if i == l.snapshot.Index {
-		return l.snapshot.Term, true
-	}
 	base := l.entries[0].Index
 	if i < base {
 		return 0, false

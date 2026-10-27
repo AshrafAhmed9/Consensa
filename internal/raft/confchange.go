@@ -92,16 +92,6 @@ func membershipFromConfChange(c confChangeEntry) Membership {
 	return Membership{Old: idSet(c.Old), New: idSet(c.New), Joint: true}
 }
 
-// membershipFromConfState works out the voters recorded in a snapshot.
-func membershipFromConfState(c ConfState) Membership {
-	return Membership{Old: idSet(c.Old), New: idSet(c.New), Joint: c.Joint}
-}
-
-// confStateFromMembership is the reverse: the voters to record in a snapshot.
-func confStateFromMembership(m Membership) ConfState {
-	return ConfState{Old: idList(m.Old), New: idList(m.New), Joint: m.Joint}
-}
-
 // recomputeMembership sets the node's voters from the newest config entry in its log, or
 // from the starting config if the log has none. It rescans the whole log each time
 // because that is the simplest way to stay correct when a follower's log is cut back.
@@ -116,16 +106,6 @@ func (n *node) recomputeMembership() {
 	}
 	n.membership = membership
 	n.membershipIndex = membershipIndex
-}
-
-// restoreConfState applies the voters recorded in a snapshot.
-func (n *node) restoreConfState(c ConfState, index uint64) {
-	if len(c.Old) == 0 {
-		return // the snapshot recorded no config, keep the starting one
-	}
-	n.initialMembership = membershipFromConfState(c)
-	n.membership = n.initialMembership
-	n.membershipIndex = index
 }
 
 // isVoter reports whether id may vote right now (old or new voters while joint).

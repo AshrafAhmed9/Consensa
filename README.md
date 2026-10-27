@@ -12,11 +12,10 @@ replica applies it to its own HNSW graph. Search reads the local graph.
 
 | Path | What it is |
 |---|---|
-| `internal/raft` | Raft: leader election with pre-vote, log replication, snapshots, learners, joint-consensus membership changes. The algorithm is a pure state machine; `Host` adds TCP and disk. |
-| `internal/storage` | Small LSM store (WAL, skiplist memtable, SSTables) used as Raft's durable log. |
+| `internal/raft` | Raft: leader election with pre-vote, log replication, learners, joint-consensus membership changes. The algorithm is a pure state machine; `Host` adds TCP and disk. |
+| `internal/storage` | Tiny key-value store (a checksummed log file plus an in-memory map) used as Raft's durable log. |
 | `internal/ann` | HNSW index and `DurableNode`, which applies Raft-committed inserts and deletes to it. A restarted node rebuilds its graph by replaying its own log. |
 | `internal/server`, `api/` | The gRPC service: `Upsert` (streaming), `Search` (streaming), `Delete`, `Status`. |
-| `internal/kv` | Key-range descriptors and a pure `SplitDescriptor`. This is the code side of `specs/split.tla`. Nothing in the server shards on it yet. |
 | `cmd/consensa` | The node binary. |
 | `cmd/democlient` | Small gRPC client used by `demo.sh`. |
 | `cmd/torture`, `harness/torture` | Fault-injection runs against a Raft cluster plus a linearizability checker. |
@@ -53,7 +52,7 @@ Writes only succeed on the current leader; a client retries across nodes until o
 **Linearizability under faults.** `cmd/torture` drives an in-process Raft cluster under a
 seeded schedule of node isolations and records the client-visible read/write history.
 `harness/torture/checker/linearizability.py` checks that history. The same seed always gives
-the same schedule, so a failing seed can be replayed.
+the same schedule, so a failing seed can be rerun.
 `python3 -m harness.torture.cli run --nemesis partition,crash --seeds 100`
 
 Limits: this is an in-process cluster, not separate OS processes. "Partition" and "crash"
@@ -64,7 +63,8 @@ state in this harness. Real process kill and restart is covered separately by
 
 **TLA+.** `specs/membership.tla` checks that during joint consensus two different candidates
 can never both win the same term (quorum intersection). `specs/split.tla` checks that
-repeated range splits never leave a key unowned or owned twice. Both are small models of
+repeated range splits never leave a key unowned or owned twice. (The server does not shard
+yet, so that one is a model only.) Both are small models of
 one property each; `specs/README.md` says what they leave out. Run with
 `make -C specs check TLA_JAR=/path/to/tla2tools.jar`.
 
@@ -78,6 +78,7 @@ and the full sweep are in `docs/benchmarks/04-ann.md`.
 - Approximate search is checked for recall, not linearizability. Only the replicated
   mutation order is linearizable.
 - There is no runtime sharding; every node holds the whole index.
+- The log is never compacted or snapshotted, so it only grows.
 - Inserts and deletes compare against every stored vector, so building a large index is slow (5,000 vectors takes about 2 s). Search does not have this cost.
 - Reads are served from the local replica and can lag the leader.
 - No auth, TLS or metrics.

@@ -8,8 +8,13 @@ import (
 	"path/filepath"
 )
 
-// wal is the write-ahead log: every write is appended here before it is acknowledged, so
-// it can be replayed after a crash.
+// record is one key and its value.
+type record struct {
+	key, value []byte
+}
+
+// wal is the write-ahead log: every write is appended here, so it can be replayed after a
+// crash.
 //
 // Each record is: 4-byte length, 4-byte checksum, then the payload (4-byte key length,
 // key, value). A half-written record at the very end is normal after a crash and is

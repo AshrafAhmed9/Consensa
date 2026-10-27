@@ -24,27 +24,10 @@ type Entry struct {
 // message that depends on it. Otherwise a restart could contradict a vote it already gave.
 type HardState struct{ Term, Vote, Commit uint64 }
 
-// ConfState is the voter configuration saved inside a snapshot. A snapshot throws away the
-// log entries that set the configuration, so the configuration has to travel with it.
-// An empty ConfState means "no configuration recorded" and keeps the startup one.
-type ConfState struct {
-	Old, New []NodeID
-	Joint    bool
-}
-
-// Snapshot stands in for every log entry up to Index: the application state at that
-// point, plus the voter configuration then.
-type Snapshot struct {
-	Index, Term uint64
-	Data        []byte
-	ConfState   ConfState
-}
-
 // MessageType is the kind of message nodes send each other.
 type MessageType uint8
 
-// The pre-vote and vote requests and replies, log replication and its reply, and
-// snapshot installation.
+// The pre-vote and vote requests and replies, and log replication and its reply.
 const (
 	MsgPreVote MessageType = iota
 	MsgPreVoteResp
@@ -52,7 +35,6 @@ const (
 	MsgVoteResp
 	MsgAppend
 	MsgAppendResp
-	MsgSnapshot
 )
 
 // Message is one message between nodes. It does not depend on the network used to send it.
@@ -62,7 +44,6 @@ type Message struct {
 	Term, Index, LogTerm, Commit uint64
 	Reject                       bool
 	Entries                      []Entry
-	Snapshot                     Snapshot
 }
 
 // Config is the starting setup of a node. The election timeout should be several

@@ -1,37 +1,21 @@
-"""Command line for the torture harness: run many seeds, or replay a saved failing seed."""
+"""Command line for the torture harness: run the register workload for many seeds."""
 
 import argparse
-from pathlib import Path
 
-from harness.torture.history import History, read_history, write_history
-from harness.torture.nemesis import schedule
 from harness.torture.workload import register
-
-
-def execute(seed: int, nemeses: list[str]) -> bool:
-    """Runs the register workload against a real internal/raft.Cluster (cmd/torture) under
-    the seed's fault schedule and records the schedule only if the history is not
-    linearizable."""
-    passed = register.run(seed, nemeses)
-    events = [fault.__dict__ for fault in schedule(seed, nemeses, 20)]
-    if not passed:
-        write_history(Path("harness/torture/results") / f"seed-{seed}.json", History(seed, "register", events))
-    return passed
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    sub = parser.add_subparsers(dest="command", required=True)
-    run = sub.add_parser("run")
-    run.add_argument("--nemesis", default="partition,crash")
-    run.add_argument("--seeds", type=int, default=1)
-    replay = sub.add_parser("replay")
-    replay.add_argument("--history", type=Path, required=True)
+    parser.add_argument("run", choices=["run"])
+    parser.add_argument("--nemesis", default="partition,crash", help="comma-separated fault kinds")
+    parser.add_argument("--seeds", type=int, default=1, help="run seeds 0 up to this number")
     args = parser.parse_args()
-    if args.command == "replay":
-        saved = read_history(args.history)
-        return 0 if execute(saved.seed, [event["kind"] for event in saved.events]) else 1
-    return 0 if all(execute(seed, args.nemesis.split(",")) for seed in range(args.seeds)) else 1
+    nemeses = args.nemesis.split(",")
+    failed = [seed for seed in range(args.seeds) if not register.run(seed, nemeses)]
+    for seed in failed:
+        print(f"seed {seed}: history is NOT linearizable (rerun with the same seed to reproduce)")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

@@ -12,7 +12,6 @@ import (
 type Ready struct {
 	HardState        HardState
 	Entries          []Entry
-	Snapshot         Snapshot
 	CommittedEntries []Entry
 	Messages         []Message
 }
@@ -43,8 +42,6 @@ type Node interface {
 	// Leader returns who this node believes the leader is, or 0 if it doesn't know. This
 	// is a local guess and can be out of date.
 	Leader() NodeID
-	// ConfState returns the voter configuration to store with a snapshot.
-	ConfState() ConfState
 }
 
 type node struct {
@@ -183,8 +180,6 @@ func (n *node) Step(m Message) error {
 		n.handleAppend(m)
 	case MsgAppendResp:
 		n.handleAppendResp(m)
-	case MsgSnapshot:
-		n.handleSnapshot(m)
 	default:
 		return errors.New("raft: unknown message")
 	}
@@ -213,7 +208,6 @@ func (n *node) Advance() {
 
 func (n *node) Status() (Role, uint64) { return n.role, n.term }
 func (n *node) Leader() NodeID         { return NodeID(n.leader) }
-func (n *node) ConfState() ConfState   { return confStateFromMembership(n.membership) }
 func (n *node) send(m Message)         { m.From = n.id; n.msgs = append(n.msgs, m) }
 
 // becomeFollower steps down (or stays a follower) in the given term.

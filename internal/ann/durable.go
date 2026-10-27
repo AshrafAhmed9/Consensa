@@ -29,7 +29,6 @@ type DurableNode struct {
 type DurableNodeConfig struct {
 	ID             raft.NodeID
 	GroupPeers     []raft.NodeID          // every node in the group, including this one
-	Learners       []raft.NodeID          // members of GroupPeers that do not vote
 	ListenAddress  string                 // where this node accepts Raft messages from peers
 	TransportPeers map[raft.NodeID]string // address of every other node
 	StorageDir     string                 // directory for the Raft log (reuse it to restart)
@@ -61,7 +60,7 @@ func NewDurableNode(cfg DurableNodeConfig) (*DurableNode, error) {
 		heartbeatTick = 2
 	}
 	host, err := raft.NewHost(raft.HostConfig{
-		Raft:          raft.Config{ID: cfg.ID, Peers: cfg.GroupPeers, Learners: cfg.Learners, ElectionTick: electionTick, HeartbeatTick: heartbeatTick},
+		Raft:          raft.Config{ID: cfg.ID, Peers: cfg.GroupPeers, ElectionTick: electionTick, HeartbeatTick: heartbeatTick},
 		ListenAddress: cfg.ListenAddress,
 		Peers:         cfg.TransportPeers,
 		Persister:     raft.NewPersister(db),

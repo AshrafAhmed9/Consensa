@@ -10,31 +10,21 @@ import (
 )
 
 var hardStateKey = []byte("raft/hard-state")
-var snapshotKey = []byte("raft/snapshot")
 
-// Persister saves a node's durable state (term, vote, log, snapshot) to the storage
+// Persister saves a node's durable state (term, vote and log) to the storage
 // engine. It must run before the node's messages are sent.
 type Persister struct{ db *storage.DB }
 
 // NewPersister saves Raft state into db.
 func NewPersister(db *storage.DB) *Persister { return &Persister{db: db} }
 
-// Persist saves the hard state, any new snapshot and every new log entry, then syncs the
+// Persist saves the hard state and every new log entry, then syncs the
 // write-ahead log once so all of it is on disk before the caller sends any message.
 func (p *Persister) Persist(ready Ready) error {
 	if data, err := json.Marshal(ready.HardState); err != nil {
 		return err
 	} else if err := p.db.Put(hardStateKey, data); err != nil {
 		return err
-	}
-	if ready.Snapshot.Index != 0 {
-		data, err := json.Marshal(ready.Snapshot)
-		if err != nil {
-			return err
-		}
-		if err := p.db.Put(snapshotKey, data); err != nil {
-			return err
-		}
 	}
 	for _, entry := range ready.Entries {
 		data, err := json.Marshal(entry)
@@ -56,16 +46,6 @@ func (p *Persister) LoadHardState() (HardState, error) {
 	}
 	var state HardState
 	return state, json.Unmarshal(data, &state)
-}
-
-// LoadSnapshot reads back the saved snapshot. It returns storage.ErrNotFound if there is none.
-func (p *Persister) LoadSnapshot() (Snapshot, error) {
-	data, err := p.db.Get(snapshotKey)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	var snapshot Snapshot
-	return snapshot, json.Unmarshal(data, &snapshot)
 }
 
 // LoadEntries reads back every saved log entry, in index order.
@@ -98,19 +78,9 @@ func RecoverNode(config Config, persister *Persister) (Node, error) {
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return nil, err
 	}
-	snapshot, err := persister.LoadSnapshot()
-	if err != nil && !errors.Is(err, storage.ErrNotFound) {
-		return nil, err
-	}
 	entries, err := persister.LoadEntries()
 	if err != nil {
 		return nil, err
-	}
-	if snapshot.Index > 0 {
-		recovered.log.snapshot = snapshot
-		recovered.log.entries = []Entry{{Index: snapshot.Index, Term: snapshot.Term}}
-		recovered.log.applied = snapshot.Index
-		recovered.restoreConfState(snapshot.ConfState, snapshot.Index)
 	}
 	for _, entry := range entries {
 		if entry.Index <= recovered.log.lastIndex() {

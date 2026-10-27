@@ -1,6 +1,6 @@
 """Register workload: runs cmd/torture (a Raft cluster in one process) under a fault
 schedule made from a seed, then checks the reads and writes it recorded for linearizability.
-The same seed always gives the same fault schedule, so a failing seed can be replayed.
+The same seed always gives the same fault schedule, so a failing seed can be rerun.
 """
 
 import json
