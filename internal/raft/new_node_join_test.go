@@ -12,8 +12,7 @@ import (
 // node 4's *testHost is constructed only after nodes 1-3 have already elected a leader
 // and committed real entries -- its address exists nowhere in any of the other three
 // hosts' transports until AddPeer registers it, exactly the deployment-time gap
-// docs/notes/11-joint-consensus.md named ("no workflow yet for provisioning a brand-new
-// process and publishing its address"). Without AddPeer, ProposeConfChange would still
+// of provisioning a brand-new process and publishing its address. Without AddPeer, ProposeConfChange would still
 // succeed at the Raft membership layer, but every message to node 4 would fail with
 // "unknown peer address" and it could never actually catch up.
 func TestBrandNewProcessJoinsLiveGroupAsLearnerThenVoter(t *testing.T) {
@@ -81,7 +80,7 @@ func TestBrandNewProcessJoinsLiveGroupAsLearnerThenVoter(t *testing.T) {
 	if leader == nil {
 		t.Fatal("no leader found among nodes 1-3 before proposing the conf change")
 	}
-	// Node 4 joins as a learner first -- Raft's own safety story (docs/adr/010) requires
+	// Node 4 joins as a learner first -- Raft's own safety story requires
 	// a learner catch up via replication/snapshot before it can be trusted with a vote.
 	if err := leader.host.ProposeConfChange(ids, []NodeID{fourID}); err != nil {
 		t.Fatalf("leader %d: ProposeConfChange(learner=4): %v", leader.id, err)

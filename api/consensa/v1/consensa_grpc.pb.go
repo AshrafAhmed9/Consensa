@@ -19,11 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Consensa_Upsert_FullMethodName   = "/consensa.v1.Consensa/Upsert"
-	Consensa_Search_FullMethodName   = "/consensa.v1.Consensa/Search"
-	Consensa_Delete_FullMethodName   = "/consensa.v1.Consensa/Delete"
-	Consensa_BatchGet_FullMethodName = "/consensa.v1.Consensa/BatchGet"
-	Consensa_Status_FullMethodName   = "/consensa.v1.Consensa/Status"
+	Consensa_Upsert_FullMethodName = "/consensa.v1.Consensa/Upsert"
+	Consensa_Search_FullMethodName = "/consensa.v1.Consensa/Search"
+	Consensa_Delete_FullMethodName = "/consensa.v1.Consensa/Delete"
+	Consensa_Status_FullMethodName = "/consensa.v1.Consensa/Status"
 )
 
 // ConsensaClient is the client API for Consensa service.
@@ -33,7 +32,6 @@ type ConsensaClient interface {
 	Upsert(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[UpsertRequest, UpsertResponse], error)
 	Search(ctx context.Context, in *SearchRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SearchResult], error)
 	Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
-	BatchGet(ctx context.Context, in *BatchGetRequest, opts ...grpc.CallOption) (*BatchGetResponse, error)
 	Status(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusResponse, error)
 }
 
@@ -87,16 +85,6 @@ func (c *consensaClient) Delete(ctx context.Context, in *DeleteRequest, opts ...
 	return out, nil
 }
 
-func (c *consensaClient) BatchGet(ctx context.Context, in *BatchGetRequest, opts ...grpc.CallOption) (*BatchGetResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(BatchGetResponse)
-	err := c.cc.Invoke(ctx, Consensa_BatchGet_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 func (c *consensaClient) Status(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(StatusResponse)
@@ -114,7 +102,6 @@ type ConsensaServer interface {
 	Upsert(grpc.ClientStreamingServer[UpsertRequest, UpsertResponse]) error
 	Search(*SearchRequest, grpc.ServerStreamingServer[SearchResult]) error
 	Delete(context.Context, *DeleteRequest) (*DeleteResponse, error)
-	BatchGet(context.Context, *BatchGetRequest) (*BatchGetResponse, error)
 	Status(context.Context, *StatusRequest) (*StatusResponse, error)
 	mustEmbedUnimplementedConsensaServer()
 }
@@ -134,9 +121,6 @@ func (UnimplementedConsensaServer) Search(*SearchRequest, grpc.ServerStreamingSe
 }
 func (UnimplementedConsensaServer) Delete(context.Context, *DeleteRequest) (*DeleteResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Delete not implemented")
-}
-func (UnimplementedConsensaServer) BatchGet(context.Context, *BatchGetRequest) (*BatchGetResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method BatchGet not implemented")
 }
 func (UnimplementedConsensaServer) Status(context.Context, *StatusRequest) (*StatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Status not implemented")
@@ -198,24 +182,6 @@ func _Consensa_Delete_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Consensa_BatchGet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(BatchGetRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ConsensaServer).BatchGet(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Consensa_BatchGet_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ConsensaServer).BatchGet(ctx, req.(*BatchGetRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 func _Consensa_Status_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(StatusRequest)
 	if err := dec(in); err != nil {
@@ -246,10 +212,6 @@ var Consensa_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Consensa_Delete_Handler,
 		},
 		{
-			MethodName: "BatchGet",
-			Handler:    _Consensa_BatchGet_Handler,
-		},
-		{
 			MethodName: "Status",
 			Handler:    _Consensa_Status_Handler,
 		},
@@ -266,299 +228,5 @@ var Consensa_ServiceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 	},
-	Metadata: "api/consensa/v1/consensa.proto",
-}
-
-const (
-	ConsensaKV_TransactionalPut_FullMethodName = "/consensa.v1.ConsensaKV/TransactionalPut"
-)
-
-// ConsensaKVClient is the client API for ConsensaKV service.
-//
-// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-//
-// ConsensaKV is a separate service from Consensa (the vector-index plane) on purpose: it
-// exposes internal/txn's cross-range 2PC coordinator, which has nothing to do with the
-// HNSW Index a Consensa server wraps. See internal/server/kv_service.go's doc comment for
-// the full reasoning and what this deliberately does not yet cover (single-key writes,
-// reads, and the DurableRange-per-range assembly are the caller's job today).
-type ConsensaKVClient interface {
-	TransactionalPut(ctx context.Context, in *TransactionalPutRequest, opts ...grpc.CallOption) (*TransactionalPutResponse, error)
-}
-
-type consensaKVClient struct {
-	cc grpc.ClientConnInterface
-}
-
-func NewConsensaKVClient(cc grpc.ClientConnInterface) ConsensaKVClient {
-	return &consensaKVClient{cc}
-}
-
-func (c *consensaKVClient) TransactionalPut(ctx context.Context, in *TransactionalPutRequest, opts ...grpc.CallOption) (*TransactionalPutResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(TransactionalPutResponse)
-	err := c.cc.Invoke(ctx, ConsensaKV_TransactionalPut_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// ConsensaKVServer is the server API for ConsensaKV service.
-// All implementations must embed UnimplementedConsensaKVServer
-// for forward compatibility.
-//
-// ConsensaKV is a separate service from Consensa (the vector-index plane) on purpose: it
-// exposes internal/txn's cross-range 2PC coordinator, which has nothing to do with the
-// HNSW Index a Consensa server wraps. See internal/server/kv_service.go's doc comment for
-// the full reasoning and what this deliberately does not yet cover (single-key writes,
-// reads, and the DurableRange-per-range assembly are the caller's job today).
-type ConsensaKVServer interface {
-	TransactionalPut(context.Context, *TransactionalPutRequest) (*TransactionalPutResponse, error)
-	mustEmbedUnimplementedConsensaKVServer()
-}
-
-// UnimplementedConsensaKVServer must be embedded to have
-// forward compatible implementations.
-//
-// NOTE: this should be embedded by value instead of pointer to avoid a nil
-// pointer dereference when methods are called.
-type UnimplementedConsensaKVServer struct{}
-
-func (UnimplementedConsensaKVServer) TransactionalPut(context.Context, *TransactionalPutRequest) (*TransactionalPutResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method TransactionalPut not implemented")
-}
-func (UnimplementedConsensaKVServer) mustEmbedUnimplementedConsensaKVServer() {}
-func (UnimplementedConsensaKVServer) testEmbeddedByValue()                    {}
-
-// UnsafeConsensaKVServer may be embedded to opt out of forward compatibility for this service.
-// Use of this interface is not recommended, as added methods to ConsensaKVServer will
-// result in compilation errors.
-type UnsafeConsensaKVServer interface {
-	mustEmbedUnimplementedConsensaKVServer()
-}
-
-func RegisterConsensaKVServer(s grpc.ServiceRegistrar, srv ConsensaKVServer) {
-	// If the following call panics, it indicates UnimplementedConsensaKVServer was
-	// embedded by pointer and is nil.  This will cause panics if an
-	// unimplemented method is ever invoked, so we test this at initialization
-	// time to prevent it from happening at runtime later due to I/O.
-	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
-		t.testEmbeddedByValue()
-	}
-	s.RegisterService(&ConsensaKV_ServiceDesc, srv)
-}
-
-func _ConsensaKV_TransactionalPut_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(TransactionalPutRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ConsensaKVServer).TransactionalPut(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: ConsensaKV_TransactionalPut_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ConsensaKVServer).TransactionalPut(ctx, req.(*TransactionalPutRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-// ConsensaKV_ServiceDesc is the grpc.ServiceDesc for ConsensaKV service.
-// It's only intended for direct use with grpc.RegisterService,
-// and not to be introspected or modified (even as a copy)
-var ConsensaKV_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "consensa.v1.ConsensaKV",
-	HandlerType: (*ConsensaKVServer)(nil),
-	Methods: []grpc.MethodDesc{
-		{
-			MethodName: "TransactionalPut",
-			Handler:    _ConsensaKV_TransactionalPut_Handler,
-		},
-	},
-	Streams:  []grpc.StreamDesc{},
-	Metadata: "api/consensa/v1/consensa.proto",
-}
-
-const (
-	ConsensaAdmin_AddReplica_FullMethodName     = "/consensa.v1.ConsensaAdmin/AddReplica"
-	ConsensaAdmin_PromoteReplica_FullMethodName = "/consensa.v1.ConsensaAdmin/PromoteReplica"
-)
-
-// ConsensaAdminClient is the client API for ConsensaAdmin service.
-//
-// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-//
-// ConsensaAdmin is a separate service again, for the same reason ConsensaKV is separate
-// from Consensa: it exposes a different, unrelated primitive -- internal/raft's joint-
-// consensus membership-change primitives (Host.AddKnownPeer, Host.AddPeer,
-// DurableRange.ProposeConfChange), proven in internal/raft/new_node_join_test.go against
-// real processes but until this service nothing reachable over the network could ever
-// drive them. Like every other RPC in this codebase, this is deliberately unauthenticated
-// -- there is no auth layer anywhere in this project yet, and adding one only for this
-// service would imply a false sense of protection nothing else here actually has. A real
-// deployment would need to put this behind a real auth layer before exposing it publicly;
-// that is separate, unbuilt work, stated here rather than left implied.
-type ConsensaAdminClient interface {
-	// AddReplica registers a new (possibly brand-new, previously-unknown) node's ID and
-	// transport address on the named range, so a subsequent PromoteReplica call naming that
-	// ID can succeed -- see kv.DurableRange.AddKnownPeer/AddPeerAddress's own doc comments
-	// for why these are two separate, local, per-replica steps rather than one RPC.
-	AddReplica(ctx context.Context, in *AddReplicaRequest, opts ...grpc.CallOption) (*AddReplicaResponse, error)
-	// PromoteReplica drives kv.DurableRange.ProposeConfChange against the named range's
-	// current leader, moving it through Raft's joint-consensus protocol to the requested
-	// voter/learner sets. It fails if this node isn't currently that range's leader --
-	// callers should retry against a different node, mirroring TransactionalPut's own
-	// "route to whoever's actually in charge" contract.
-	PromoteReplica(ctx context.Context, in *PromoteReplicaRequest, opts ...grpc.CallOption) (*PromoteReplicaResponse, error)
-}
-
-type consensaAdminClient struct {
-	cc grpc.ClientConnInterface
-}
-
-func NewConsensaAdminClient(cc grpc.ClientConnInterface) ConsensaAdminClient {
-	return &consensaAdminClient{cc}
-}
-
-func (c *consensaAdminClient) AddReplica(ctx context.Context, in *AddReplicaRequest, opts ...grpc.CallOption) (*AddReplicaResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(AddReplicaResponse)
-	err := c.cc.Invoke(ctx, ConsensaAdmin_AddReplica_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *consensaAdminClient) PromoteReplica(ctx context.Context, in *PromoteReplicaRequest, opts ...grpc.CallOption) (*PromoteReplicaResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(PromoteReplicaResponse)
-	err := c.cc.Invoke(ctx, ConsensaAdmin_PromoteReplica_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// ConsensaAdminServer is the server API for ConsensaAdmin service.
-// All implementations must embed UnimplementedConsensaAdminServer
-// for forward compatibility.
-//
-// ConsensaAdmin is a separate service again, for the same reason ConsensaKV is separate
-// from Consensa: it exposes a different, unrelated primitive -- internal/raft's joint-
-// consensus membership-change primitives (Host.AddKnownPeer, Host.AddPeer,
-// DurableRange.ProposeConfChange), proven in internal/raft/new_node_join_test.go against
-// real processes but until this service nothing reachable over the network could ever
-// drive them. Like every other RPC in this codebase, this is deliberately unauthenticated
-// -- there is no auth layer anywhere in this project yet, and adding one only for this
-// service would imply a false sense of protection nothing else here actually has. A real
-// deployment would need to put this behind a real auth layer before exposing it publicly;
-// that is separate, unbuilt work, stated here rather than left implied.
-type ConsensaAdminServer interface {
-	// AddReplica registers a new (possibly brand-new, previously-unknown) node's ID and
-	// transport address on the named range, so a subsequent PromoteReplica call naming that
-	// ID can succeed -- see kv.DurableRange.AddKnownPeer/AddPeerAddress's own doc comments
-	// for why these are two separate, local, per-replica steps rather than one RPC.
-	AddReplica(context.Context, *AddReplicaRequest) (*AddReplicaResponse, error)
-	// PromoteReplica drives kv.DurableRange.ProposeConfChange against the named range's
-	// current leader, moving it through Raft's joint-consensus protocol to the requested
-	// voter/learner sets. It fails if this node isn't currently that range's leader --
-	// callers should retry against a different node, mirroring TransactionalPut's own
-	// "route to whoever's actually in charge" contract.
-	PromoteReplica(context.Context, *PromoteReplicaRequest) (*PromoteReplicaResponse, error)
-	mustEmbedUnimplementedConsensaAdminServer()
-}
-
-// UnimplementedConsensaAdminServer must be embedded to have
-// forward compatible implementations.
-//
-// NOTE: this should be embedded by value instead of pointer to avoid a nil
-// pointer dereference when methods are called.
-type UnimplementedConsensaAdminServer struct{}
-
-func (UnimplementedConsensaAdminServer) AddReplica(context.Context, *AddReplicaRequest) (*AddReplicaResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method AddReplica not implemented")
-}
-func (UnimplementedConsensaAdminServer) PromoteReplica(context.Context, *PromoteReplicaRequest) (*PromoteReplicaResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method PromoteReplica not implemented")
-}
-func (UnimplementedConsensaAdminServer) mustEmbedUnimplementedConsensaAdminServer() {}
-func (UnimplementedConsensaAdminServer) testEmbeddedByValue()                       {}
-
-// UnsafeConsensaAdminServer may be embedded to opt out of forward compatibility for this service.
-// Use of this interface is not recommended, as added methods to ConsensaAdminServer will
-// result in compilation errors.
-type UnsafeConsensaAdminServer interface {
-	mustEmbedUnimplementedConsensaAdminServer()
-}
-
-func RegisterConsensaAdminServer(s grpc.ServiceRegistrar, srv ConsensaAdminServer) {
-	// If the following call panics, it indicates UnimplementedConsensaAdminServer was
-	// embedded by pointer and is nil.  This will cause panics if an
-	// unimplemented method is ever invoked, so we test this at initialization
-	// time to prevent it from happening at runtime later due to I/O.
-	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
-		t.testEmbeddedByValue()
-	}
-	s.RegisterService(&ConsensaAdmin_ServiceDesc, srv)
-}
-
-func _ConsensaAdmin_AddReplica_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(AddReplicaRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ConsensaAdminServer).AddReplica(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: ConsensaAdmin_AddReplica_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ConsensaAdminServer).AddReplica(ctx, req.(*AddReplicaRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _ConsensaAdmin_PromoteReplica_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(PromoteReplicaRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ConsensaAdminServer).PromoteReplica(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: ConsensaAdmin_PromoteReplica_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ConsensaAdminServer).PromoteReplica(ctx, req.(*PromoteReplicaRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-// ConsensaAdmin_ServiceDesc is the grpc.ServiceDesc for ConsensaAdmin service.
-// It's only intended for direct use with grpc.RegisterService,
-// and not to be introspected or modified (even as a copy)
-var ConsensaAdmin_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "consensa.v1.ConsensaAdmin",
-	HandlerType: (*ConsensaAdminServer)(nil),
-	Methods: []grpc.MethodDesc{
-		{
-			MethodName: "AddReplica",
-			Handler:    _ConsensaAdmin_AddReplica_Handler,
-		},
-		{
-			MethodName: "PromoteReplica",
-			Handler:    _ConsensaAdmin_PromoteReplica_Handler,
-		},
-	},
-	Streams:  []grpc.StreamDesc{},
 	Metadata: "api/consensa/v1/consensa.proto",
 }

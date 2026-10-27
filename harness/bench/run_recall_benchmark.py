@@ -1,11 +1,6 @@
 """Runs the real Go ANN index (cmd/annbench) against a dataset and measures recall@k
 against an independent Python brute-force ground truth (recall.py).
 
-This is the connector docs/benchmarks/04-ann.md names as missing: a prior HNSW benchmark
-in that file measured only raw search latency and explicitly said "this ... is not a
-recall@10 measurement and must not be compared to real-corpus ANN benchmarks until the
-pinned-corpus harness is connected to the Go index." This script is that connection.
-
 The dataset is synthetic (see generate_dataset.py's docstring for why); the recall numbers
 this script measures are real, non-fabricated numbers from actually running the Go binary
 and actually computing ground truth independently in Python -- they are just not yet
@@ -52,7 +47,6 @@ def main() -> None:
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--hnsw-sweep", default="16,32,64,128")
-    parser.add_argument("--ivfflat-sweep", default="1,2,4,8")
     args = parser.parse_args()
 
     with open(args.dataset) as f:
@@ -69,7 +63,7 @@ def main() -> None:
     binary = build_go_binary(args.repo_root)
 
     rows = []
-    for index_kind, sweep_flag, param_name in [("hnsw", args.hnsw_sweep, "efSearch"), ("ivfflat", args.ivfflat_sweep, "nProbe")]:
+    for index_kind, sweep_flag, param_name in [("hnsw", args.hnsw_sweep, "efSearch")]:
         result = run_index(binary, args.dataset, index_kind, args.k, sweep_flag)
         for sweep in result["sweeps"]:
             recalls = []
@@ -88,7 +82,7 @@ def main() -> None:
 
     print(f"\n{'index':<8} {'param':<10} {'recall@' + str(args.k):<12} {'mean search (us)':<18} build (ms)")
     for row in rows:
-        param = row.get("efSearch", row.get("nProbe"))
+        param = row["efSearch"]
         print(f"{row['index']:<8} {param:<10} {row['mean_recall_at_k']:<12} {row['mean_search_us']:<18} {row['build_ms']}")
 
     print(json.dumps(rows))

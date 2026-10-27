@@ -21,7 +21,7 @@ jobs:
         with: {version: v2.13.2}
       # -p 1 runs packages sequentially rather than GitHub's shared 2-vCPU runner's
       # default full parallelism. Several packages here spin up real OS processes and
-      # real TCP Raft clusters (cmd/consensa, internal/raft, internal/kv, internal/ann);
+      # real TCP Raft clusters (cmd/consensa, internal/raft, internal/ann);
       # under -race's added instrumentation overhead, running all of them at once on
       # weak, contended hardware measurably increases the odds any one of their
       # real-election deadlines gets missed under scheduling pressure that has nothing to

@@ -80,7 +80,7 @@ func TestTortureProducesValidHistory(t *testing.T) {
 // TestTortureIsolatesTargetNode proves a targeted fault actually changes recorded
 // behavior compared to the fault-free case above -- if this ever stopped being true, the
 // fault injection would be silently decorative the same way the pre-Go-driver
-// register.run() used to be (see docs/notes/06-torture.md).
+// register.run() used to be.
 func TestTortureIsolatesTargetNode(t *testing.T) {
 	bin := buildTortureBinary(t)
 	// Shaped exactly like harness/torture/nemesis.py's Fault.__dict__ output -- "kind" is
@@ -105,7 +105,5 @@ func TestTortureIsolatesTargetNode(t *testing.T) {
 		t.Fatalf("output is not valid JSON: %s", out)
 	}
 	// The precise assertion here is deliberately weak: it only checks the run completes
-	// and produces a well-formed history under an active fault, not a specific outcome --
-	// docs/notes/06-torture.md documents in detail what this fault duration can and cannot
-	// be expected to disturb.
+	// and produces a well-formed history under an active fault, not a specific outcome
 }

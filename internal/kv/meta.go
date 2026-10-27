@@ -7,15 +7,11 @@ import (
 	"sync"
 )
 
-// Meta stores descriptors in start-key order. It is intentionally a simple static catalog
-// until meta ranges themselves are backed by Raft in the multi-node assembly.
-//
-// mu guards descriptors: Lookup was originally only ever called after every Replace had
-// already happened (bootstrap-then-read), but a live split (kv.ExecuteLiveSplit) now
-// calls Replace from a background goroutine while gRPC handler goroutines concurrently
-// call Lookup through Router.Route -- an unsynchronized slice-header reassignment
-// racing a concurrent range-over read is a real data race under Go's memory model, not
-// just a theoretical one, so this is no longer optional once Replace can run live.
+// ErrRangeKeyMismatch means no descriptor owns the key, so the caller's view is stale.
+var ErrRangeKeyMismatch = errors.New("kv: range key mismatch")
+
+// Meta stores descriptors in start-key order. mu guards descriptors so Replace can swap
+// in a new catalog while Lookup runs concurrently.
 type Meta struct {
 	mu          sync.RWMutex
 	descriptors []Descriptor

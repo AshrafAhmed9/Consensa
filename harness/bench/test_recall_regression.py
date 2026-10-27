@@ -1,6 +1,6 @@
 """Deterministic recall@k regression gate for the real Go HNSW index.
 
-PLAN.md is explicit about why a bare `recall >= threshold` assertion is a flake generator:
+A bare `recall >= threshold` assertion is a flake generator:
 HNSW's level assignment is randomized, so a fresh build's recall varies run to run unless
 everything about the run is pinned. This test pins the RNG seed, the dataset (size,
 dimension, cluster count), the query set, and the HNSW parameters, and compares against a

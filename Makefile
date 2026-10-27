@@ -1,4 +1,4 @@
-.PHONY: test race vet lint bench torture verify
+.PHONY: test race vet lint torture verify
 
 test:
 	go test -p 1 ./...
@@ -11,9 +11,6 @@ vet:
 
 lint:
 	golangci-lint run
-
-bench:
-	go test -bench=. -benchmem ./internal/storage
 
 torture:
 	pytest harness/torture

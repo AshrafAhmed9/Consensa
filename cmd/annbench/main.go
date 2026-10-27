@@ -1,9 +1,7 @@
-// Command annbench builds a real ann.HNSW or ann.IVFFlat index over a dataset and reports
+// Command annbench builds a real ann.HNSW index over a dataset and reports
 // its search results as JSON, so an independent process (the Python recall harness) can
 // compute recall@k against its own brute-force ground truth without trusting anything
-// computed inside this binary. This is the connector docs/benchmarks/04-ann.md names as
-// missing: "must not be compared to real-corpus ANN benchmarks until the pinned-corpus
-// harness is connected to the Go index."
+// computed inside this binary.
 package main
 
 import (
@@ -57,13 +55,12 @@ type searcher interface {
 
 func main() {
 	datasetPath := flag.String("dataset", "", "path to a dataset JSON file (see harness/bench/generate_dataset.py)")
-	indexKind := flag.String("index", "hnsw", `"hnsw" or "ivfflat"`)
+	indexKind := flag.String("index", "hnsw", `only "hnsw" is supported`)
 	k := flag.Int("k", 10, "number of neighbours to request per query")
-	m := flag.Int("m", 16, "HNSW M (ignored for ivfflat)")
-	efConstruction := flag.Int("ef-construction", 64, "HNSW EFConstruction (ignored for ivfflat)")
-	sweep := flag.String("sweep", "16,32,64,128", "comma-separated efSearch (hnsw) or nProbe (ivfflat) values to measure")
+	m := flag.Int("m", 16, "HNSW M")
+	efConstruction := flag.Int("ef-construction", 64, "HNSW EFConstruction")
+	sweep := flag.String("sweep", "16,32,64,128", "comma-separated efSearch values to measure")
 	seed := flag.Uint64("seed", 1, "index construction seed (HNSW level assignment)")
-	centroids := flag.Int("centroids", 16, "ivfflat only: number of centroids, taken as the first N dataset vectors (not k-means-trained -- see docs/benchmarks/04-ann.md)")
 	flag.Parse()
 
 	if *datasetPath == "" {
@@ -101,25 +98,6 @@ func main() {
 			}
 		}
 		index = h
-	case "ivfflat":
-		n := *centroids
-		if n > len(ds.Vectors) {
-			n = len(ds.Vectors)
-		}
-		seedVectors := make([]vector.Vector, n)
-		for i := 0; i < n; i++ {
-			seedVectors[i] = vector.Vector(ds.Vectors[i].Values)
-		}
-		f, err := ann.NewIVFFlat(ds.Dimension, seedVectors)
-		if err != nil {
-			fatal(err)
-		}
-		for _, v := range ds.Vectors {
-			if err := f.Insert(v.ID, vector.Vector(v.Values)); err != nil {
-				fatal(err)
-			}
-		}
-		index = f
 	default:
 		fmt.Fprintf(os.Stderr, "annbench: unknown -index %q\n", *indexKind)
 		os.Exit(1)

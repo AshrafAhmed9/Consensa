@@ -4,10 +4,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
-	"time"
 )
-
-var readBarrierCommand = []byte("consensa/raft/read-barrier/v1")
 
 // HostConfig supplies the impure adapters around one pure Raft Node. Apply must be
 // idempotent across restart because a committed entry can be replayed after durable commit
@@ -19,9 +16,7 @@ type HostConfig struct {
 	Persister     *Persister
 	Apply         func(Entry) error
 	// Transport, if set, is used instead of NewHost dialing its own dedicated TCP
-	// listener -- this is what lets multiple ranges' Hosts on the same node share one
-	// real listener through a *MultiplexedTransport (see multiplex.go) instead of each
-	// opening its own socket. ListenAddress and Peers are ignored when Transport is set;
+	// listener -- ListenAddress and Peers are ignored when Transport is set;
 	// the caller already resolved addressing when it built the shared transport.
 	Transport Transport
 }
@@ -84,13 +79,12 @@ func NewHost(config HostConfig) (*Host, error) {
 // electionStaggerSpread widens the gap hostElectionStagger puts between consecutively
 // ranked peers, beyond the raw [base, 2*base) range the position-based formula alone
 // would produce. A process that hosts several independently-elected Raft groups sharing
-// one deployment (cmd/consensa's vector index plus its KV ranges, all built from the same
-// peer list) relies on the SAME node winning every one of those groups' elections, since
-// nothing forwards a request to a different process's leader (docs/notes/05-api.md). The
+// one deployment relies on the SAME node winning every one of those groups' elections, since
+// nothing forwards a request to a different process's leader. The
 // position-based formula alone gives the favored (lowest-ranked) node only a fractional
 // head start over the next-ranked node, which real network delivery jitter between
 // otherwise-identical, independently-timed groups can occasionally overcome -- producing
-// a real, observed failure (docs/bugs/003) where different processes end up leading
+// a failure where different processes end up leading
 // different co-located groups. Multiplying the spread gives the favored node a much
 // larger, harder-to-overcome head start without changing anything about which node is
 // favored or the safety of the election protocol itself -- Raft's safety never depends on
@@ -137,22 +131,6 @@ func (h *Host) Leader() NodeID {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.node.Leader()
-}
-
-// TransferLeadershipTo asks this host, if it is currently leader, to hand leadership to a
-// specific caught-up voting peer -- see Node.TransferLeadershipTo's doc comment for the
-// safety argument. This is docs/bugs/003's real fix, not the earlier mitigation
-// (electionStaggerSpread): a process that finds itself leading some but not all of its
-// co-located Raft groups can now actively request leadership of the groups it is missing,
-// rather than only hoping a wider election-timer bias prevents the split from ever
-// occurring in the first place.
-func (h *Host) TransferLeadershipTo(to NodeID) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if err := h.node.TransferLeadershipTo(to); err != nil {
-		return err
-	}
-	return h.driveLocked()
 }
 
 // ConfState returns the membership metadata that must be included with a snapshot made
@@ -230,7 +208,7 @@ func (h *Host) AddKnownPeer(id NodeID) {
 // a new voter or learner that Raft counts toward quorum but can never actually replicate
 // to. Returns an error if this Host's transport doesn't implement raft.PeerRegistrar --
 // true only for a caller-supplied Transport (config.Transport) that doesn't support it,
-// never for the transports NewHost builds itself (ListenTCP, MultiplexedTransport.Register).
+// never for the transports NewHost builds itself (ListenTCP).
 func (h *Host) AddPeer(id NodeID, address string) error {
 	registrar, ok := h.transport.(PeerRegistrar)
 	if !ok {
@@ -238,50 +216,6 @@ func (h *Host) AddPeer(id NodeID, address string) error {
 	}
 	registrar.AddPeer(id, address)
 	return nil
-}
-
-// ReadIndex confirms this leader still has a quorum before a linearizable read. It
-// replicates a reserved no-op and waits until that entry is locally applied; committing it
-// requires a current quorum, so an isolated former leader times out instead of serving a
-// response that could violate real-time order. This is deliberately a conservative
-// read-barrier implementation: the later heartbeat-context optimization can remove the
-// log entry without weakening the safety argument.
-func (h *Host) ReadIndex(timeout time.Duration) (uint64, error) {
-	h.mu.Lock()
-	if role, _ := h.node.Status(); role != Leader {
-		h.mu.Unlock()
-		return 0, errors.New("raft: read index requires leader")
-	}
-	if err := h.node.Propose(readBarrierCommand); err != nil {
-		h.mu.Unlock()
-		return 0, err
-	}
-	target := h.node.(*node).log.lastIndex()
-	if err := h.driveLocked(); err != nil {
-		h.mu.Unlock()
-		return 0, err
-	}
-	progress := h.progress
-	h.mu.Unlock()
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	for {
-		select {
-		case <-progress:
-			h.mu.Lock()
-			applied := h.node.(*node).log.applied
-			role, _ := h.node.Status()
-			next := h.progress
-			h.mu.Unlock()
-			if applied >= target && role == Leader {
-				return target, nil
-			}
-			progress = next
-		case <-timer.C:
-			return 0, errors.New("raft: read index quorum confirmation timed out")
-		}
-	}
 }
 
 // Close stops the peer listener. It does not close the caller-owned storage engine.
@@ -307,7 +241,7 @@ func (h *Host) driveLocked() error {
 		_ = h.transport.Send(message)
 	}
 	for _, entry := range ready.CommittedEntries {
-		if string(entry.Data) != string(readBarrierCommand) && !isRaftInternalData(entry.Data) {
+		if !isRaftInternalData(entry.Data) {
 			if err := h.apply(entry); err != nil {
 				return err
 			}

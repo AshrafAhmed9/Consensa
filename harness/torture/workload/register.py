@@ -4,8 +4,7 @@ fault schedule and checks the resulting real operation history for linearizabili
 Before this existed, run() checked a fixed, hand-written two-operation history that never
 touched Go and never depended on the seed or nemesis schedule at all -- torture run
 --seeds 5000 would have repeated the identical check 5000 times and always passed,
-regardless of whether Consensa's Raft implementation actually had a bug. See
-docs/notes/06-torture.md for the full story.
+regardless of whether Consensa's Raft implementation actually had a bug.
 """
 
 import json

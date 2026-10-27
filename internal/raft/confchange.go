@@ -118,8 +118,7 @@ func confStateFromMembership(m Membership) ConfState {
 // already applied -- get silently discarded and replaced), and getting that wrong would
 // silently corrupt quorum computation, the single worst class of bug this project can
 // have. A full rescan is O(log length) and this codebase's own priorities already accept
-// worse for correctness-first code elsewhere (storage.DB.Get's linear scan,
-// ReadIndex's per-read log entry) -- this is the same trade, applied to the one place
+// worse for correctness-first code elsewhere (storage.DB.Get's linear scan) -- this is the same trade, applied to the one place
 // where getting it wrong is least acceptable of all.
 func (n *node) recomputeMembership() {
 	membership := n.initialMembership

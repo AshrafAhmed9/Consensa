@@ -2,194 +2,73 @@
 
 [![CI](https://github.com/AshrafAhmed9/Consensa/actions/workflows/ci.yml/badge.svg)](https://github.com/AshrafAhmed9/Consensa/actions/workflows/ci.yml)
 
-A distributed vector database, built from scratch in Go: a hand-written Raft consensus
-implementation, a durable MVCC storage engine, an HNSW approximate-nearest-neighbor
-index, cross-shard transactions, and a chaos-testing harness that attacks all of it with
-real process kills and network partitions. No consensus library, no embedded database,
-no vector-search library — the algorithms themselves are the project.
+A small distributed vector database in Go. Raft is written by hand (no consensus library),
+vector search is an HNSW index written from scratch, and clients talk to it over gRPC.
 
-Every node in the diagrams below is a real OS process. Every claim in this README is
-backed by a test that runs against real TCP sockets and real killed processes, not an
-in-memory simulation standing in for one.
+A client upserts a vector. A majority of replicas log it durably through Raft, then every
+replica applies it to its own HNSW graph. Search reads the local graph.
 
-## What it does
+## What's in here
 
-Think of it as "Pinecone, but you can see every line of the replication logic." A client
-sends a vector; three (or more) replicas agree on it via Raft, write it durably to disk,
-and index it for nearest-neighbor search — so that killing any one replica's process
-loses no data and drops no in-flight query.
+| Path | What it is |
+|---|---|
+| `internal/raft` | Raft: leader election with pre-vote, log replication, snapshots, learners, joint-consensus membership changes. The algorithm is a pure state machine; `Host` adds TCP and disk. |
+| `internal/storage` | Small LSM store (WAL, skiplist memtable, SSTables) used as Raft's durable log. |
+| `internal/ann` | HNSW index and `DurableNode`, which applies Raft-committed inserts and deletes to it. A restarted node rebuilds its graph by replaying its own log. |
+| `internal/server`, `api/` | The gRPC service: `Upsert` (streaming), `Search` (streaming), `Delete`, `Status`. |
+| `internal/kv` | Key-range descriptors and a pure `SplitDescriptor`. This is the code side of `specs/split.tla`. Nothing in the server shards on it yet. |
+| `cmd/consensa` | The node binary. |
+| `cmd/torture`, `harness/torture` | Fault-injection runs against a Raft cluster plus a linearizability checker. |
+| `cmd/annbench`, `harness/bench` | Recall benchmark against brute-force ground truth. |
+| `specs/` | TLA+ models checked with TLC. |
 
-```mermaid
-flowchart TB
-    Client["Client app<br/>RAG pipeline / gRPC client"]
-    API["gRPC API<br/>Upsert · Search · TransactionalPut"]
-    Router["Router<br/>which shard owns this key?"]
-
-    Client --> API --> Router --> Leader
-
-    subgraph Range["One shard = one 3-node Raft group"]
-        direction LR
-        Leader["Node 1 — Leader<br/>Raft + HNSW + MVCC storage"]
-        Follower2["Node 2 — Follower"]
-        Follower3["Node 3 — Follower"]
-        Leader ---|replicate| Follower2
-        Leader ---|replicate| Follower3
-    end
-
-    Leader --> Applied["Durable storage (WAL + SSTables)<br/>+ HNSW search graph"]
-
-    Split["Range splitter<br/>size threshold"]
-    Torture["Chaos harness<br/>kills nodes, cuts network"]
-    TLA["TLA+ specs<br/>proves the protocol on paper"]
-
-    Split -. splits .-> Range
-    Torture -. attacks nightly .-> Range
-    TLA -. proves safety .-> Range
-```
-
-A write only succeeds once a majority of a shard's replicas have durably logged it. A
-read from the leader is always linearizable; a bounded-staleness read from a follower is
-available once that replica holds a valid lease. Vector search is approximate by
-construction (that's what makes it fast at scale) — it is never described as
-linearizable, and the KV/metadata plane is the only part of this project that makes that
-claim.
-
-## Try it
-
-```sh
-./demo.sh
-```
-
-brings up a real 3-node cluster and walks it through the whole system live: auth-gated
-writes and searches, a cross-range transaction, a shard splitting automatically under
-load and merging back once it's cold, a node getting killed mid-run, and the survivors
-carrying on while the killed node recovers from its own on-disk log — ending with real
-Prometheus metrics pulled straight from a running process. It uses
-[`cmd/democlient`](cmd/democlient), a small real gRPC client, not a mock.
-
-Or run nodes by hand:
+## Run a node
 
 ```sh
 go run ./cmd/consensa -id 1 -peers "1=127.0.0.1:9001,2=127.0.0.1:9002,3=127.0.0.1:9003" \
-  -data-dir /tmp/consensa1 -grpc-listen :8081 -metrics-listen :9091 -dimension 3
-# repeat for -id 2 and -id 3 with their own --data-dir/--grpc-listen/--metrics-listen
+  -data-dir /tmp/consensa1 -grpc-listen :8081 -dimension 3
+# repeat for -id 2 and -id 3 with their own -data-dir and -grpc-listen
 ```
 
-or the whole cluster plus a live Grafana dashboard in one command:
+Writes only succeed on the current leader; a client retries across nodes until one accepts.
 
-```sh
-docker compose -f deploy/docker-compose.yml --profile demo up --build
-# Grafana: http://localhost:3000 (anonymous admin, demo-only) · Prometheus: :9090
-docker compose -f deploy/docker-compose.yml kill consensa3   # kill a node live
-docker compose -f deploy/docker-compose.yml up -d consensa3  # watch it recover
-```
+## What is verified
 
-## What's actually proven
+**Linearizability under faults.** `cmd/torture` drives an in-process Raft cluster under a
+seeded schedule of node isolations and records the client-visible read/write history.
+`harness/torture/checker/linearizability.py` checks that history. The same seed always gives
+the same schedule, so a failing seed can be replayed.
+`python3 -m harness.torture.cli run --nemesis partition,crash --seeds 100`
 
-Every bullet below is backed by a specific, named test that runs against real replicas —
-not asserted, not just "should work." The full account, including exactly what each test
-does and doesn't cover, is in [`docs/correctness.md`](docs/correctness.md).
+Limits: this is an in-process cluster, not separate OS processes. "Partition" and "crash"
+are both modeled as full isolation of one node, so a crashed node does not lose or recover
+state in this harness. Real process kill and restart is covered separately by
+`cmd/consensa/main_e2e_test.go`, which runs three real processes, kills one and restarts it
+from its own disk.
 
-| Area | What's proven |
-|---|---|
-| **Consensus** | Hand-built Raft with pre-vote and the Figure 8 commit-safety rule, each closed by a scripted test that fails if the rule is weakened — not just "the happy path works." |
-| **Durability** | A killed-and-restarted replica recovers its full state from its own on-disk log alone, before contacting a single peer — proven for both the vector index and the KV store. |
-| **The shipped binary** | An end-to-end test builds the real `consensa` binary, runs three real OS processes, kills one mid-write, and checks the survivors and the recovered process over real gRPC. |
-| **Chaos testing** | A seeded Python harness drives real partitions, process kills, and clock skew against real Raft clusters and checks the resulting history for linearizability (via [Porcupine](https://github.com/anishathalye/porcupine)) and search-result correctness. |
-| **Cross-shard transactions** | A 2PC coordinator commits atomically across two independent 3-node Raft groups, reachable over a real gRPC call, and survives a coordinator crash mid-commit. |
-| **Live range splits and merges** | A shard splits into two fresh replica groups with no vector or key lost, duplicated, or leaking across the new boundary — proven on both the KV and vector planes, including publishing the new routing metadata atomically so both a fresh client and one holding a pre-split cached route resolve correctly afterward. Both planes do this fully automatically inside the running binary, not just as a library primitive — real writes crossing a threshold trigger real child Raft groups standing up and taking over live traffic, and once both children go cold they merge back the same way. |
-| **Joint-consensus membership changes** | Adding, promoting, or removing a replica goes through Raft's two-phase joint-consensus protocol, so a disjoint old/new majority can never both elect a leader — the specific failure mode joint consensus exists to prevent is covered directly. This now includes provisioning a genuinely new, previously-unknown process, reachable over a real, optionally auth-gated `ConsensaAdmin` gRPC surface, not just an internal Go primitive. |
-| **Read-path ladder** | Leader reads via a quorum-confirmed barrier (`ReadIndex`); follower reads via a replicated lease and closed timestamp, rejected until both are actually valid — not just modeled. |
-| **Write-skew prevention** | The classic "two on-call doctors" anomaly is reproduced and the specific write that would complete it is rejected, on both the in-memory and Raft-replicated code paths; a transaction pushed by that check can also read-refresh and commit anyway instead of always aborting, proven on both paths too. |
-| **Formal verification** | TLA+ models of joint-consensus quorum intersection and recursive range splitting, model-checked by TLC — each with a deliberately broken variant that must fail, so the checker itself is proven discriminating. |
-| **Observability** | Real Prometheus metrics (Raft term, QPS, recall, and now the split-trigger recommendation) from a live process, rendered on an auto-provisioned Grafana dashboard, recall computed by an external client against an independent ground truth. |
+**TLA+.** `specs/membership.tla` checks that during joint consensus two different candidates
+can never both win the same term (quorum intersection). `specs/split.tla` checks that
+repeated range splits never leave a key unowned or owned twice. Both are small models of
+one property each; `specs/README.md` says what they leave out. Run with
+`make -C specs check TLA_JAR=/path/to/tla2tools.jar`.
 
-`docs/bugs/` has a write-up for every real bug the test suite or chaos harness actually
-found — root cause, fix, seed, regression test. `docs/adr/` records the design decisions,
-including the ones later sessions overturned.
-
-## What's inside
-
-- **`internal/raft`** — Raft from the paper: pre-vote, the Figure 8 commit rule, snapshots,
-  learners, and full joint-consensus membership changes, as a pure state machine with no
-  goroutines or I/O inside the algorithm itself.
-- **`internal/storage`** — an LSM-tree key/value engine: WAL, skiplist memtable, sorted
-  SSTables, MVCC versioning by hybrid-logical-clock timestamp.
-- **`internal/ann`** — HNSW, including the neighbor-selection heuristic that makes it
-  outperform naive top-M graphs, plus the split-repair and merge strategies that keep
-  search correct as a shard's boundaries change live.
-- **`internal/kv`** — range sharding, routing, and the split/merge trigger decisions.
-- **`internal/txn`** — HLC, write intents, a two-phase commit coordinator, and the
-  timestamp-cache defense against write skew.
-- **`api/consensa/v1`** — the gRPC contract: streaming `Upsert`/`Search`, `TransactionalPut`.
-- **`harness/`** — the Python chaos-testing control plane and checkers.
-- **`specs/`** — TLA+ models of the two hardest correctness properties.
+**Search quality.** On 5,000 synthetic 128-dimension vectors (20 Gaussian clusters),
+HNSW at efSearch=64 returns 98.6% of the true top-10 with a 156 µs mean search, measured
+against exact brute-force search. The data is synthetic, not a real embedding set. Method
+and the full sweep are in `docs/benchmarks/04-ann.md`.
 
 ## Known limits
 
-Split and merge are both fully automatic now, on both planes, inside the running binary
-— not library primitives you'd have to wire up yourself. Everything below is a real,
-specific limit of the current design, not a vague disclaimer.
+- Approximate search is checked for recall, not linearizability. Only the replicated
+  mutation order is linearizable.
+- There is no runtime sharding; every node holds the whole index.
+- Reads are served from the local replica and can lag the leader.
+- No auth, TLS or metrics.
 
-- **Split.** Once `kv.ShouldSplit`/`ann.ShouldSplit` recommends one, `cmd/consensa` stands
-  up fresh child Raft groups on the shared transport, migrates data, and cuts traffic
-  over live (`kv.ExecuteLiveSplit` / `ann.ExecuteLiveSplitByRepair`, exercised end-to-end
-  by `TestConsensaBinaryExecutesALiveSplitAutomatically` and its vector-plane twin). The
-  trigger fires on size or QPS (`--split-qps-threshold`, off by default), so a small but
-  hot range can still split. The retired parent rejects every request instead of quietly
-  serving stale data (`MarkRetired`, `ErrRangeKeyMismatch`) — that closes the
-  silent-divergence risk, but it's not a zero-window guarantee across two processes'
-  independently cached routes.
-- **The vector split boundary is a lexicographic ID cut, not a clustering-aware one** —
-  measured at a 37.7% relative recall hit right after a split
-  (`docs/adr/011-vector-split-boundary.md`). Each child graph is rebuilt by one
-  replicated, deterministic repair of the parent's structure (drop cross-boundary edges,
-  backfill replacement neighbors) rather than reinserting every vector — recall lands
-  within 5% of a full rebuild, at one Raft entry per child instead of one per vector
-  (`docs/adr/012-replicated-incremental-repair.md`). A real clustering-aware boundary is
-  still unbuilt.
-- **Merge** (`docs/adr/014-live-range-merges.md`) reverses a split once both children go
-  cold: `--merge-threshold` and `--merge-qps-threshold` gate it, the right child freezes
-  through a Raft barrier, its data migrates into the left child's group, and it retires
-  the same way a split parent does. Two things worth knowing before you rely on it —
-  eligibility today only ever considers split-created sibling pairs, so the two original
-  static ranges can never merge with anything; a write racing the freeze barrier can
-  commit and then get silently discarded, which is the same "proposed isn't committed"
-  contract every caller here already has to handle with a read-until-visible retry, not
-  a new failure mode merge invented; and the migration isn't fully leadership-aware — it
-  runs on whichever process performed the split, using that process's own local handle to
-  the surviving range. A leadership-affinity extension pulls that range's leadership back
-  toward the split executor when it can, which covers the common case, but
-  `TransferLeadershipTo` can only be initiated by the current leader handing off, so a
-  process that never held that leadership has no way to request it — convergence isn't
-  guaranteed on any particular schedule.
-- **Membership changes** go through joint consensus end to end, including provisioning a
-  genuinely new process over gRPC (`ConsensaAdmin.AddReplica`/`PromoteReplica`), and
-  `consensa-cli join` scripts the add-then-promote sequence for you — though it still
-  needs every replica's address by hand (no service discovery) and joins one range at a
-  time. Every RPC across all three services can require a bearer token
-  (`--auth-token`/`--admin-auth-token`, both off by default, scoped separately so a
-  leaked data-plane token can't drive membership changes — see `docs/notes/13-auth.md`).
-  There's no per-user identity, no token rotation, and no transport encryption on top of
-  that.
-- **Snapshot isolation** now read-refreshes instead of always aborting on a write-skew
-  push, proven on both the in-memory and Raft-replicated stores. The closed timestamp
-  advances and follower-read leases renew automatically on a running binary, but no RPC
-  surface exposes follower reads to a client yet. A cross-range transaction still commits
-  through a single process that leads every range it touches — there's no server-side
-  forwarding — but which process that is no longer a coin flip: a leadership-transfer
-  primitive plus a self-correcting affinity policy converges co-located groups onto the
-  same preferred leader, closing the intermittent failure in `docs/bugs/003`.
-
-See `docs/correctness.md` for the complete, current list.
-
-## Verification
+## Tests
 
 ```sh
-go build ./...
 go vet ./...
 go test -race -p 1 ./...
 python3 -m pytest harness
 ```
-
-Build plan: [`PLAN.md`](PLAN.md).

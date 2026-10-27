@@ -81,8 +81,8 @@ func main() {
 		if f, ok := byStep[round]; ok {
 			target := raft.NodeID(f.Target%(*nodeCount)) + 1
 			// "partition" and "crash" are modeled identically here -- full isolation of
-			// the target node's messages for this one round -- which is a deliberate,
-			// documented simplification (see docs/notes/06-torture.md), not an oversight:
+			// the target node's messages for this one round -- which is a deliberate
+			// simplification, not an oversight:
 			// distinguishing a genuine crash (node also stops ticking, loses no state vs.
 			// keeps state) from a network partition (node keeps ticking, fully retains
 			// state) needs a richer fault model than this first pass builds.

@@ -13,9 +13,7 @@ class Fault:
 
 # internal/raft/cluster.go sets ElectionTick to 3 + a per-node stagger (position), so the
 # shortest fuse on any node is 3 ticks with no leader contact. A fault window shorter than
-# that can never let a node's own election machinery activate at all -- see
-# docs/notes/06-torture.md's account of the Figure-8/pre-vote regression tests that a
-# single-round fault model could not catch regardless of seed count. MIN_WINDOW is set
+# that can never let a node's own election machinery activate at all, so MIN_WINDOW is set
 # above that floor so a generated window is long enough, by construction, to matter.
 MIN_WINDOW = 4
 MAX_WINDOW = 10

@@ -2,8 +2,8 @@ package raft
 
 import "testing"
 
-// newLearnerGroup builds a 4-node group: 3 voters (1,2,3) and 1 learner (4), matching
-// PLAN.md Phase 11's own example ("a node joins... as a non-voting learner").
+// newLearnerGroup builds a 4-node group: 3 voters (1,2,3) and 1 learner (4), with one
+// node joining as a non-voting learner.
 func newLearnerGroup(t *testing.T) map[NodeID]Node {
 	t.Helper()
 	ns := map[NodeID]Node{}

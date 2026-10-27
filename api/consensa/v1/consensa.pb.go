@@ -353,94 +353,6 @@ func (*DeleteResponse) Descriptor() ([]byte, []int) {
 	return file_api_consensa_v1_consensa_proto_rawDescGZIP(), []int{6}
 }
 
-type BatchGetRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ids           []string               `protobuf:"bytes,1,rep,name=ids,proto3" json:"ids,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *BatchGetRequest) Reset() {
-	*x = BatchGetRequest{}
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[7]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *BatchGetRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BatchGetRequest) ProtoMessage() {}
-
-func (x *BatchGetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[7]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BatchGetRequest.ProtoReflect.Descriptor instead.
-func (*BatchGetRequest) Descriptor() ([]byte, []int) {
-	return file_api_consensa_v1_consensa_proto_rawDescGZIP(), []int{7}
-}
-
-func (x *BatchGetRequest) GetIds() []string {
-	if x != nil {
-		return x.Ids
-	}
-	return nil
-}
-
-type BatchGetResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Vectors       map[string]*Vector     `protobuf:"bytes,1,rep,name=vectors,proto3" json:"vectors,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *BatchGetResponse) Reset() {
-	*x = BatchGetResponse{}
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[8]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *BatchGetResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*BatchGetResponse) ProtoMessage() {}
-
-func (x *BatchGetResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[8]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use BatchGetResponse.ProtoReflect.Descriptor instead.
-func (*BatchGetResponse) Descriptor() ([]byte, []int) {
-	return file_api_consensa_v1_consensa_proto_rawDescGZIP(), []int{8}
-}
-
-func (x *BatchGetResponse) GetVectors() map[string]*Vector {
-	if x != nil {
-		return x.Vectors
-	}
-	return nil
-}
-
 type StatusRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -449,7 +361,7 @@ type StatusRequest struct {
 
 func (x *StatusRequest) Reset() {
 	*x = StatusRequest{}
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[9]
+	mi := &file_api_consensa_v1_consensa_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -461,7 +373,7 @@ func (x *StatusRequest) String() string {
 func (*StatusRequest) ProtoMessage() {}
 
 func (x *StatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[9]
+	mi := &file_api_consensa_v1_consensa_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -474,7 +386,7 @@ func (x *StatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusRequest.ProtoReflect.Descriptor instead.
 func (*StatusRequest) Descriptor() ([]byte, []int) {
-	return file_api_consensa_v1_consensa_proto_rawDescGZIP(), []int{9}
+	return file_api_consensa_v1_consensa_proto_rawDescGZIP(), []int{7}
 }
 
 type StatusResponse struct {
@@ -487,7 +399,7 @@ type StatusResponse struct {
 
 func (x *StatusResponse) Reset() {
 	*x = StatusResponse{}
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[10]
+	mi := &file_api_consensa_v1_consensa_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -499,7 +411,7 @@ func (x *StatusResponse) String() string {
 func (*StatusResponse) ProtoMessage() {}
 
 func (x *StatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[10]
+	mi := &file_api_consensa_v1_consensa_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -512,7 +424,7 @@ func (x *StatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusResponse.ProtoReflect.Descriptor instead.
 func (*StatusResponse) Descriptor() ([]byte, []int) {
-	return file_api_consensa_v1_consensa_proto_rawDescGZIP(), []int{10}
+	return file_api_consensa_v1_consensa_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *StatusResponse) GetRole() string {
@@ -527,288 +439,6 @@ func (x *StatusResponse) GetTerm() uint64 {
 		return x.Term
 	}
 	return 0
-}
-
-type TransactionalPutRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// txn_id must be unique per transaction; the caller picks it (a UUID, typically) since
-	// only the caller knows whether a retried call is the same transaction or a new one.
-	TxnId         string            `protobuf:"bytes,1,opt,name=txn_id,json=txnId,proto3" json:"txn_id,omitempty"`
-	Writes        map[string][]byte `protobuf:"bytes,2,rep,name=writes,proto3" json:"writes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *TransactionalPutRequest) Reset() {
-	*x = TransactionalPutRequest{}
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[11]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *TransactionalPutRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*TransactionalPutRequest) ProtoMessage() {}
-
-func (x *TransactionalPutRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[11]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use TransactionalPutRequest.ProtoReflect.Descriptor instead.
-func (*TransactionalPutRequest) Descriptor() ([]byte, []int) {
-	return file_api_consensa_v1_consensa_proto_rawDescGZIP(), []int{11}
-}
-
-func (x *TransactionalPutRequest) GetTxnId() string {
-	if x != nil {
-		return x.TxnId
-	}
-	return ""
-}
-
-func (x *TransactionalPutRequest) GetWrites() map[string][]byte {
-	if x != nil {
-		return x.Writes
-	}
-	return nil
-}
-
-type TransactionalPutResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *TransactionalPutResponse) Reset() {
-	*x = TransactionalPutResponse{}
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[12]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *TransactionalPutResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*TransactionalPutResponse) ProtoMessage() {}
-
-func (x *TransactionalPutResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[12]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use TransactionalPutResponse.ProtoReflect.Descriptor instead.
-func (*TransactionalPutResponse) Descriptor() ([]byte, []int) {
-	return file_api_consensa_v1_consensa_proto_rawDescGZIP(), []int{12}
-}
-
-type AddReplicaRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RangeId       uint64                 `protobuf:"varint,1,opt,name=range_id,json=rangeId,proto3" json:"range_id,omitempty"`
-	NodeId        uint64                 `protobuf:"varint,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
-	Address       string                 `protobuf:"bytes,3,opt,name=address,proto3" json:"address,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *AddReplicaRequest) Reset() {
-	*x = AddReplicaRequest{}
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[13]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *AddReplicaRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*AddReplicaRequest) ProtoMessage() {}
-
-func (x *AddReplicaRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[13]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use AddReplicaRequest.ProtoReflect.Descriptor instead.
-func (*AddReplicaRequest) Descriptor() ([]byte, []int) {
-	return file_api_consensa_v1_consensa_proto_rawDescGZIP(), []int{13}
-}
-
-func (x *AddReplicaRequest) GetRangeId() uint64 {
-	if x != nil {
-		return x.RangeId
-	}
-	return 0
-}
-
-func (x *AddReplicaRequest) GetNodeId() uint64 {
-	if x != nil {
-		return x.NodeId
-	}
-	return 0
-}
-
-func (x *AddReplicaRequest) GetAddress() string {
-	if x != nil {
-		return x.Address
-	}
-	return ""
-}
-
-type AddReplicaResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *AddReplicaResponse) Reset() {
-	*x = AddReplicaResponse{}
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[14]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *AddReplicaResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*AddReplicaResponse) ProtoMessage() {}
-
-func (x *AddReplicaResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[14]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use AddReplicaResponse.ProtoReflect.Descriptor instead.
-func (*AddReplicaResponse) Descriptor() ([]byte, []int) {
-	return file_api_consensa_v1_consensa_proto_rawDescGZIP(), []int{14}
-}
-
-type PromoteReplicaRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RangeId       uint64                 `protobuf:"varint,1,opt,name=range_id,json=rangeId,proto3" json:"range_id,omitempty"`
-	VoterIds      []uint64               `protobuf:"varint,2,rep,packed,name=voter_ids,json=voterIds,proto3" json:"voter_ids,omitempty"`
-	LearnerIds    []uint64               `protobuf:"varint,3,rep,packed,name=learner_ids,json=learnerIds,proto3" json:"learner_ids,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *PromoteReplicaRequest) Reset() {
-	*x = PromoteReplicaRequest{}
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[15]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *PromoteReplicaRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PromoteReplicaRequest) ProtoMessage() {}
-
-func (x *PromoteReplicaRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[15]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PromoteReplicaRequest.ProtoReflect.Descriptor instead.
-func (*PromoteReplicaRequest) Descriptor() ([]byte, []int) {
-	return file_api_consensa_v1_consensa_proto_rawDescGZIP(), []int{15}
-}
-
-func (x *PromoteReplicaRequest) GetRangeId() uint64 {
-	if x != nil {
-		return x.RangeId
-	}
-	return 0
-}
-
-func (x *PromoteReplicaRequest) GetVoterIds() []uint64 {
-	if x != nil {
-		return x.VoterIds
-	}
-	return nil
-}
-
-func (x *PromoteReplicaRequest) GetLearnerIds() []uint64 {
-	if x != nil {
-		return x.LearnerIds
-	}
-	return nil
-}
-
-type PromoteReplicaResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *PromoteReplicaResponse) Reset() {
-	*x = PromoteReplicaResponse{}
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[16]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *PromoteReplicaResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*PromoteReplicaResponse) ProtoMessage() {}
-
-func (x *PromoteReplicaResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_consensa_v1_consensa_proto_msgTypes[16]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use PromoteReplicaResponse.ProtoReflect.Descriptor instead.
-func (*PromoteReplicaResponse) Descriptor() ([]byte, []int) {
-	return file_api_consensa_v1_consensa_proto_rawDescGZIP(), []int{16}
 }
 
 var File_api_consensa_v1_consensa_proto protoreflect.FileDescriptor
@@ -832,49 +462,16 @@ const file_api_consensa_v1_consensa_proto_rawDesc = "" +
 	"\bdistance\x18\x02 \x01(\x02R\bdistance\"\x1f\n" +
 	"\rDeleteRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\"\x10\n" +
-	"\x0eDeleteResponse\"#\n" +
-	"\x0fBatchGetRequest\x12\x10\n" +
-	"\x03ids\x18\x01 \x03(\tR\x03ids\"\xa9\x01\n" +
-	"\x10BatchGetResponse\x12D\n" +
-	"\avectors\x18\x01 \x03(\v2*.consensa.v1.BatchGetResponse.VectorsEntryR\avectors\x1aO\n" +
-	"\fVectorsEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12)\n" +
-	"\x05value\x18\x02 \x01(\v2\x13.consensa.v1.VectorR\x05value:\x028\x01\"\x0f\n" +
+	"\x0eDeleteResponse\"\x0f\n" +
 	"\rStatusRequest\"8\n" +
 	"\x0eStatusResponse\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x12\n" +
-	"\x04term\x18\x02 \x01(\x04R\x04term\"\xb5\x01\n" +
-	"\x17TransactionalPutRequest\x12\x15\n" +
-	"\x06txn_id\x18\x01 \x01(\tR\x05txnId\x12H\n" +
-	"\x06writes\x18\x02 \x03(\v20.consensa.v1.TransactionalPutRequest.WritesEntryR\x06writes\x1a9\n" +
-	"\vWritesEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"\x1a\n" +
-	"\x18TransactionalPutResponse\"a\n" +
-	"\x11AddReplicaRequest\x12\x19\n" +
-	"\brange_id\x18\x01 \x01(\x04R\arangeId\x12\x17\n" +
-	"\anode_id\x18\x02 \x01(\x04R\x06nodeId\x12\x18\n" +
-	"\aaddress\x18\x03 \x01(\tR\aaddress\"\x14\n" +
-	"\x12AddReplicaResponse\"p\n" +
-	"\x15PromoteReplicaRequest\x12\x19\n" +
-	"\brange_id\x18\x01 \x01(\x04R\arangeId\x12\x1b\n" +
-	"\tvoter_ids\x18\x02 \x03(\x04R\bvoterIds\x12\x1f\n" +
-	"\vlearner_ids\x18\x03 \x03(\x04R\n" +
-	"learnerIds\"\x18\n" +
-	"\x16PromoteReplicaResponse2\xe1\x02\n" +
+	"\x04term\x18\x02 \x01(\x04R\x04term2\x98\x02\n" +
 	"\bConsensa\x12C\n" +
 	"\x06Upsert\x12\x1a.consensa.v1.UpsertRequest\x1a\x1b.consensa.v1.UpsertResponse(\x01\x12A\n" +
 	"\x06Search\x12\x1a.consensa.v1.SearchRequest\x1a\x19.consensa.v1.SearchResult0\x01\x12A\n" +
-	"\x06Delete\x12\x1a.consensa.v1.DeleteRequest\x1a\x1b.consensa.v1.DeleteResponse\x12G\n" +
-	"\bBatchGet\x12\x1c.consensa.v1.BatchGetRequest\x1a\x1d.consensa.v1.BatchGetResponse\x12A\n" +
-	"\x06Status\x12\x1a.consensa.v1.StatusRequest\x1a\x1b.consensa.v1.StatusResponse2m\n" +
-	"\n" +
-	"ConsensaKV\x12_\n" +
-	"\x10TransactionalPut\x12$.consensa.v1.TransactionalPutRequest\x1a%.consensa.v1.TransactionalPutResponse2\xb9\x01\n" +
-	"\rConsensaAdmin\x12M\n" +
-	"\n" +
-	"AddReplica\x12\x1e.consensa.v1.AddReplicaRequest\x1a\x1f.consensa.v1.AddReplicaResponse\x12Y\n" +
-	"\x0ePromoteReplica\x12\".consensa.v1.PromoteReplicaRequest\x1a#.consensa.v1.PromoteReplicaResponseB7Z5github.com/ashraf/consensa/api/consensa/v1;consensav1b\x06proto3"
+	"\x06Delete\x12\x1a.consensa.v1.DeleteRequest\x1a\x1b.consensa.v1.DeleteResponse\x12A\n" +
+	"\x06Status\x12\x1a.consensa.v1.StatusRequest\x1a\x1b.consensa.v1.StatusResponseB7Z5github.com/ashraf/consensa/api/consensa/v1;consensav1b\x06proto3"
 
 var (
 	file_api_consensa_v1_consensa_proto_rawDescOnce sync.Once
@@ -888,55 +485,34 @@ func file_api_consensa_v1_consensa_proto_rawDescGZIP() []byte {
 	return file_api_consensa_v1_consensa_proto_rawDescData
 }
 
-var file_api_consensa_v1_consensa_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_api_consensa_v1_consensa_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_api_consensa_v1_consensa_proto_goTypes = []any{
-	(*Vector)(nil),                   // 0: consensa.v1.Vector
-	(*UpsertRequest)(nil),            // 1: consensa.v1.UpsertRequest
-	(*UpsertResponse)(nil),           // 2: consensa.v1.UpsertResponse
-	(*SearchRequest)(nil),            // 3: consensa.v1.SearchRequest
-	(*SearchResult)(nil),             // 4: consensa.v1.SearchResult
-	(*DeleteRequest)(nil),            // 5: consensa.v1.DeleteRequest
-	(*DeleteResponse)(nil),           // 6: consensa.v1.DeleteResponse
-	(*BatchGetRequest)(nil),          // 7: consensa.v1.BatchGetRequest
-	(*BatchGetResponse)(nil),         // 8: consensa.v1.BatchGetResponse
-	(*StatusRequest)(nil),            // 9: consensa.v1.StatusRequest
-	(*StatusResponse)(nil),           // 10: consensa.v1.StatusResponse
-	(*TransactionalPutRequest)(nil),  // 11: consensa.v1.TransactionalPutRequest
-	(*TransactionalPutResponse)(nil), // 12: consensa.v1.TransactionalPutResponse
-	(*AddReplicaRequest)(nil),        // 13: consensa.v1.AddReplicaRequest
-	(*AddReplicaResponse)(nil),       // 14: consensa.v1.AddReplicaResponse
-	(*PromoteReplicaRequest)(nil),    // 15: consensa.v1.PromoteReplicaRequest
-	(*PromoteReplicaResponse)(nil),   // 16: consensa.v1.PromoteReplicaResponse
-	nil,                              // 17: consensa.v1.BatchGetResponse.VectorsEntry
-	nil,                              // 18: consensa.v1.TransactionalPutRequest.WritesEntry
+	(*Vector)(nil),         // 0: consensa.v1.Vector
+	(*UpsertRequest)(nil),  // 1: consensa.v1.UpsertRequest
+	(*UpsertResponse)(nil), // 2: consensa.v1.UpsertResponse
+	(*SearchRequest)(nil),  // 3: consensa.v1.SearchRequest
+	(*SearchResult)(nil),   // 4: consensa.v1.SearchResult
+	(*DeleteRequest)(nil),  // 5: consensa.v1.DeleteRequest
+	(*DeleteResponse)(nil), // 6: consensa.v1.DeleteResponse
+	(*StatusRequest)(nil),  // 7: consensa.v1.StatusRequest
+	(*StatusResponse)(nil), // 8: consensa.v1.StatusResponse
 }
 var file_api_consensa_v1_consensa_proto_depIdxs = []int32{
-	0,  // 0: consensa.v1.UpsertRequest.vector:type_name -> consensa.v1.Vector
-	0,  // 1: consensa.v1.SearchRequest.query:type_name -> consensa.v1.Vector
-	17, // 2: consensa.v1.BatchGetResponse.vectors:type_name -> consensa.v1.BatchGetResponse.VectorsEntry
-	18, // 3: consensa.v1.TransactionalPutRequest.writes:type_name -> consensa.v1.TransactionalPutRequest.WritesEntry
-	0,  // 4: consensa.v1.BatchGetResponse.VectorsEntry.value:type_name -> consensa.v1.Vector
-	1,  // 5: consensa.v1.Consensa.Upsert:input_type -> consensa.v1.UpsertRequest
-	3,  // 6: consensa.v1.Consensa.Search:input_type -> consensa.v1.SearchRequest
-	5,  // 7: consensa.v1.Consensa.Delete:input_type -> consensa.v1.DeleteRequest
-	7,  // 8: consensa.v1.Consensa.BatchGet:input_type -> consensa.v1.BatchGetRequest
-	9,  // 9: consensa.v1.Consensa.Status:input_type -> consensa.v1.StatusRequest
-	11, // 10: consensa.v1.ConsensaKV.TransactionalPut:input_type -> consensa.v1.TransactionalPutRequest
-	13, // 11: consensa.v1.ConsensaAdmin.AddReplica:input_type -> consensa.v1.AddReplicaRequest
-	15, // 12: consensa.v1.ConsensaAdmin.PromoteReplica:input_type -> consensa.v1.PromoteReplicaRequest
-	2,  // 13: consensa.v1.Consensa.Upsert:output_type -> consensa.v1.UpsertResponse
-	4,  // 14: consensa.v1.Consensa.Search:output_type -> consensa.v1.SearchResult
-	6,  // 15: consensa.v1.Consensa.Delete:output_type -> consensa.v1.DeleteResponse
-	8,  // 16: consensa.v1.Consensa.BatchGet:output_type -> consensa.v1.BatchGetResponse
-	10, // 17: consensa.v1.Consensa.Status:output_type -> consensa.v1.StatusResponse
-	12, // 18: consensa.v1.ConsensaKV.TransactionalPut:output_type -> consensa.v1.TransactionalPutResponse
-	14, // 19: consensa.v1.ConsensaAdmin.AddReplica:output_type -> consensa.v1.AddReplicaResponse
-	16, // 20: consensa.v1.ConsensaAdmin.PromoteReplica:output_type -> consensa.v1.PromoteReplicaResponse
-	13, // [13:21] is the sub-list for method output_type
-	5,  // [5:13] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	0, // 0: consensa.v1.UpsertRequest.vector:type_name -> consensa.v1.Vector
+	0, // 1: consensa.v1.SearchRequest.query:type_name -> consensa.v1.Vector
+	1, // 2: consensa.v1.Consensa.Upsert:input_type -> consensa.v1.UpsertRequest
+	3, // 3: consensa.v1.Consensa.Search:input_type -> consensa.v1.SearchRequest
+	5, // 4: consensa.v1.Consensa.Delete:input_type -> consensa.v1.DeleteRequest
+	7, // 5: consensa.v1.Consensa.Status:input_type -> consensa.v1.StatusRequest
+	2, // 6: consensa.v1.Consensa.Upsert:output_type -> consensa.v1.UpsertResponse
+	4, // 7: consensa.v1.Consensa.Search:output_type -> consensa.v1.SearchResult
+	6, // 8: consensa.v1.Consensa.Delete:output_type -> consensa.v1.DeleteResponse
+	8, // 9: consensa.v1.Consensa.Status:output_type -> consensa.v1.StatusResponse
+	6, // [6:10] is the sub-list for method output_type
+	2, // [2:6] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_api_consensa_v1_consensa_proto_init() }
@@ -950,9 +526,9 @@ func file_api_consensa_v1_consensa_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_consensa_v1_consensa_proto_rawDesc), len(file_api_consensa_v1_consensa_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   19,
+			NumMessages:   9,
 			NumExtensions: 0,
-			NumServices:   3,
+			NumServices:   1,
 		},
 		GoTypes:           file_api_consensa_v1_consensa_proto_goTypes,
 		DependencyIndexes: file_api_consensa_v1_consensa_proto_depIdxs,

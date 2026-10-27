@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 )
 
 // ErrNotFound distinguishes an absent historical version from a present tombstone.
@@ -25,8 +24,7 @@ type Options struct {
 }
 
 // Engine is the storage contract consumed by upper layers. Its timestamp argument makes
-// historical visibility explicit now, rather than requiring an invasive API change when
-// transactions arrive in Phase 8.
+// historical visibility explicit.
 type Engine interface {
 	Put(key []byte, ts HLC, value []byte) error
 	Get(key []byte, ts HLC) ([]byte, error)
@@ -100,8 +98,6 @@ func (d *DB) Put(key []byte, ts HLC, value []byte) error { return d.write(key, t
 // Delete writes a tombstone version; absence and deletion must remain distinct for MVCC.
 func (d *DB) Delete(key []byte, ts HLC) error { return d.write(key, ts, nil, true) }
 func (d *DB) write(key []byte, ts HLC, value []byte, tombstone bool) error {
-	started := time.Now()
-	defer func() { metrics.latency.WithLabelValues("write").Observe(time.Since(started).Seconds()) }()
 	if len(key) == 0 {
 		return errors.New("storage: empty key")
 	}
@@ -116,23 +112,13 @@ func (d *DB) write(key []byte, ts HLC, value []byte, tombstone bool) error {
 	}
 	d.mem.put(k, value, tombstone)
 	if d.mem.list.size >= d.maxEntries {
-		err := d.flushLocked()
-		if err == nil {
-			metrics.operations.WithLabelValues("write").Inc()
-		}
-		return err
+		return d.flushLocked()
 	}
-	metrics.operations.WithLabelValues("write").Inc()
 	return nil
 }
 
 // Get returns the newest version not later than ts.
 func (d *DB) Get(key []byte, ts HLC) ([]byte, error) {
-	started := time.Now()
-	defer func() {
-		metrics.operations.WithLabelValues("read").Inc()
-		metrics.latency.WithLabelValues("read").Observe(time.Since(started).Seconds())
-	}()
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	if d.closed {
@@ -195,8 +181,6 @@ func (d *DB) allRecordsNewest() []record {
 // Flush writes the current memtable into a durable immutable table and starts a fresh WAL.
 func (d *DB) Flush() error { d.mu.Lock(); defer d.mu.Unlock(); return d.flushLocked() }
 func (d *DB) flushLocked() error {
-	started := time.Now()
-	defer func() { metrics.latency.WithLabelValues("flush").Observe(time.Since(started).Seconds()) }()
 	rs := d.mem.list.all()
 	if len(rs) == 0 {
 		return d.wal.sync()
@@ -221,7 +205,6 @@ func (d *DB) flushLocked() error {
 	if err != nil {
 		return err
 	}
-	metrics.operations.WithLabelValues("flush").Inc()
 	return d.compact()
 }
 

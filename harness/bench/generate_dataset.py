@@ -1,7 +1,6 @@
 """Generates a deterministic synthetic vector dataset for the ANN recall benchmark.
 
-This is SYNTHETIC data, not a real embedding corpus (SIFT-1M or similar) -- PLAN.md names
-that as the eventual dataset and this script does not pretend otherwise. It exists so the
+This is SYNTHETIC data, not a real embedding corpus (SIFT-1M or similar). It exists so the
 Go index and Python's independent ground truth can be measured against each other without
 a multi-gigabyte download blocking the benchmark from running at all. The vectors are drawn
 from a mixture of Gaussian clusters rather than pure uniform noise, because clustered data

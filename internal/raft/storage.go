@@ -16,7 +16,7 @@ var snapshotKey = []byte("raft/snapshot")
 // The caller owns the ordering: Persist(ready) -> transport send -> state-machine apply -> Advance.
 type Persister struct{ engine storage.Engine }
 
-// NewPersister binds a Raft group to the durable Phase 1 storage interface.
+// NewPersister binds a Raft group to the durable storage interface.
 func NewPersister(engine storage.Engine) *Persister { return &Persister{engine: engine} }
 
 // Persist stores HardState and every unstable entry. The max timestamp makes these metadata

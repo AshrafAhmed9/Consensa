@@ -3,14 +3,11 @@ package storage
 import (
 	"os"
 	"sort"
-	"time"
 )
 
 // compact merges all immutable tables. This is the smallest correct size-tiered policy:
 // once enough similarly sized files exist, rewriting them bounds read amplification.
 func (e *DB) compact() error {
-	started := time.Now()
-	defer func() { metrics.latency.WithLabelValues("compaction").Observe(time.Since(started).Seconds()) }()
 	if len(e.tables) < e.compactionTrigger {
 		return nil
 	}
@@ -38,6 +35,5 @@ func (e *DB) compact() error {
 		}
 	}
 	e.tables = []*sstable{t}
-	metrics.operations.WithLabelValues("compaction").Inc()
 	return nil
 }

@@ -153,9 +153,7 @@ func writeFrame(writer io.Writer, data []byte) error {
 // original one-frame-per-connection design) but silently drops data on a connection read
 // in a loop: a fresh bufio.Reader's first Read can pull more bytes off the socket than
 // this one frame needs, and discarding that bufio.Reader at return time throws away
-// whatever of the *next* frame it already buffered. MultiplexedTransport's connection
-// pooling (multiplex.go) reads many frames per connection, which is what surfaced this --
-// found as an actual test failure (9 of 10 messages missing), not by inspection.
+// whatever of the *next* frame it already buffered. A connection read in a loop is where this shows up.
 func readFrame(reader *bufio.Reader) ([]byte, error) {
 	var length [4]byte
 	if _, err := io.ReadFull(reader, length[:]); err != nil {

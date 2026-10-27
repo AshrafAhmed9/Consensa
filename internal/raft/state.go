@@ -45,9 +45,8 @@ type Snapshot struct {
 // MessageType enumerates Raft RPCs plus local proposal messages.
 type MessageType uint8
 
-// MsgPreVote through MsgTimeoutNow are MessageType's values: the pre-vote and real-vote
-// request/response pairs, log replication and its response, snapshot installation, and a
-// leader-initiated transfer nudge.
+// MsgPreVote through MsgSnapshot are MessageType's values: the pre-vote and real-vote
+// request/response pairs, log replication and its response, and snapshot installation.
 const (
 	MsgPreVote MessageType = iota
 	MsgPreVoteResp
@@ -56,14 +55,6 @@ const (
 	MsgAppend
 	MsgAppendResp
 	MsgSnapshot
-	// MsgTimeoutNow is sent only by a leader that already holds this term's leadership and
-	// has confirmed the recipient's log is fully caught up (see node.TransferLeadershipTo).
-	// Unlike a normal election timeout, the recipient skips pre-vote and calls
-	// startElection directly: the sender, being current leader, has already done the
-	// safety check pre-vote exists to do (would this election actually be viable), so
-	// repeating it here would only add a needless round trip to what should be a fast
-	// handoff.
-	MsgTimeoutNow
 )
 
 // Message is a wire-independent Raft RPC. Its slice fields are copied on receipt so the
@@ -84,7 +75,7 @@ type Config struct {
 	Peers []NodeID
 	// Learners are members of Peers that receive log replication (so they can catch up
 	// before being promoted to a full voter) but never vote and are never counted toward
-	// quorum -- Raft's own answer to the problem PLAN.md's Phase 11 section names: adding
+	// quorum -- Raft's answer to a problem with adding
 	// a brand-new, empty replica directly as a voter temporarily WEAKENS fault tolerance
 	// (the cluster now needs a majority that includes a replica that has nothing yet),
 	// where adding it as a learner first does not, since quorum() never counts it. Every

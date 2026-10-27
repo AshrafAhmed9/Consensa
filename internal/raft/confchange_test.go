@@ -272,7 +272,7 @@ func TestJointConfigCannotCommitAcrossANewConfigPartition(t *testing.T) {
 	}
 }
 
-// TestLeaderCrashDuringJointPhaseRecoversSafely covers the failure window Phase 11 is
+// TestLeaderCrashDuringJointPhaseRecoversSafely covers the failure window joint consensus is
 // designed for. The old leader sends (but cannot commit) C_old,new, then crashes. The
 // survivors that received it must elect using both quorums, commit it under that same
 // rule, and finish the transition without the failed leader.

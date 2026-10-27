@@ -6,7 +6,7 @@ import (
 	"errors"
 )
 
-// HLC is an orderable hybrid-logical timestamp. Phase 1 treats it as caller-supplied;
+// HLC is an orderable hybrid-logical timestamp. It is caller-supplied;
 // generation and clock-skew handling belong to the transaction layer.
 type HLC struct {
 	WallTime int64
