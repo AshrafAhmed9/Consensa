@@ -23,7 +23,8 @@ venv/
 # Benchmark datasets — large, downloaded on demand by harness/bench
 harness/bench/data/
 
-# TLC model-checking output
+# TLC model-checking output, and the downloaded TLC jar
+specs/tla2tools.jar
 specs/states/
 specs/*.toolbox/
 

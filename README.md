@@ -32,8 +32,10 @@ replica applies it to its own HNSW graph. Search reads the local graph.
 One command, about 15 seconds. It starts a real 3-node cluster (three OS processes), stores
 and searches vectors, kills a node with SIGKILL and keeps writing, restarts it and shows it
 serving the data again, then runs the linearizability check and the recall benchmark. It
-needs `go` and `python3` with `numpy`. The TLA+ step runs if you set
-`TLA_JAR=/path/to/tla2tools.jar` (and have `java`), and is skipped otherwise.
+needs `go` and `python3` with `numpy`. The TLA+ step needs `java` and `tla2tools.jar` in
+`specs/` (not committed; download it from the
+[TLA+ releases](https://github.com/tlaplus/tlaplus/releases)), or `TLA_JAR=/path/to/it`.
+It is skipped if either is missing.
 
 ## Run a node by hand
 

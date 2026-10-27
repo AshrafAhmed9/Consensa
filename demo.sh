@@ -4,8 +4,8 @@
 # It starts a real 3-node cluster, stores and searches vectors, kills a node and brings it
 # back, then runs the linearizability test, the recall benchmark and the TLA+ model check.
 # Needs: go, python3 with numpy.
-# For the TLA+ step also set TLA_JAR=/path/to/tla2tools.jar (and have java installed).
-# Without it that step is skipped.
+# The TLA+ step needs java and specs/tla2tools.jar (or set TLA_JAR=/path/to/tla2tools.jar).
+# Without them that step is skipped.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -88,8 +88,9 @@ python3 harness/bench/generate_dataset.py --num-vectors 5000 --dimension 128 \
 python3 harness/bench/run_recall_benchmark.py --dataset "$WORK/dataset.json" --repo-root . | sed -n '3,8p'
 
 step "8. TLA+ model check of quorum intersection and range ownership"
-if [ -z "${TLA_JAR:-}" ] || [ ! -f "$TLA_JAR" ]; then
-  echo "  skipped: set TLA_JAR=/path/to/tla2tools.jar to run it"
+TLA_JAR="${TLA_JAR:-$PWD/specs/tla2tools.jar}"
+if [ ! -f "$TLA_JAR" ]; then
+  echo "  skipped: put tla2tools.jar in specs/ or set TLA_JAR=/path/to/it"
 elif ! command -v java >/dev/null; then
   echo "  skipped: java is not installed"
 else
